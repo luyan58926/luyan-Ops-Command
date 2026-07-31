@@ -1989,9 +1989,125 @@ UI.projectFinish = (id) => {
 };
 
 /* ============================================================
+   查资源密码锁
+   ============================================================ */
+/** 读取密码存储（独立 key，不混入主数据，避免影响备份/重置） */
+UI.resStore = () => {
+  try { const raw = localStorage.getItem(NK.LS_KEY + '-reslock'); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+};
+/** 密码编码存储（非明文，但纯前端无法防住开发者工具） */
+UI.resHash = (pwd) => { try { return btoa(unescape(encodeURIComponent('nk·' + pwd))); } catch (e) { return 'e:' + String(pwd).length; } };
+/** 是否已解锁（内存 + sessionStorage：刷新页面保持，关闭浏览器后需重输） */
+UI.resUnlocked = () => {
+  if (UI._resUnlocked) return true;
+  try { if (sessionStorage.getItem(NK.LS_KEY + '-resok') === '1') { UI._resUnlocked = true; return true; } } catch (e) {}
+  return false;
+};
+UI.resUnlockNow = () => {
+  UI._resUnlocked = true;
+  try { sessionStorage.setItem(NK.LS_KEY + '-resok', '1'); } catch (e) {}
+};
+/** 锁界面：未设置密码 → 设置表单；已设置 → 输入密码表单 */
+UI.resLockHTML = () => {
+  const el = document.getElementById('view-resources');
+  const has = !!UI.resStore();
+  el.innerHTML = UI.pageHead('工程师与职场', '查资源 · 密码保护') + `
+    <div class="res-lock">
+      <div class="res-lock-ico">🔒</div>
+      <div class="res-lock-title">${has ? '请输入访问密码' : '首次使用，请设置访问密码'}</div>
+      <div class="res-lock-sub">${has ? '密码正确后才能查看工程师与职场信息' : '设置后，「查资源」页面将需要密码才能进入'}</div>
+      ${has ? `
+      <input class="res-lock-input" id="resPwdIn" type="password" placeholder="输入密码" autocomplete="off">
+      <button class="btn btn-accent btn-block" onclick="UI.resUnlock()">解锁进入</button>
+      <div class="res-lock-links"><span onclick="UI.resChangePwd()">修改密码</span></div>` : `
+      <input class="res-lock-input" id="resPwdNew" type="password" placeholder="设置新密码（至少 4 位）" autocomplete="off">
+      <input class="res-lock-input" id="resPwdNew2" type="password" placeholder="再次输入确认" autocomplete="off">
+      <button class="btn btn-accent btn-block" onclick="UI.resSetPwd()">设置密码并进入</button>`}
+      <div class="res-lock-tip">解锁状态在当前浏览器会话内保持（关闭浏览器后需重新输入）</div>
+    </div>`;
+  const bindEnter = (id, fn) => { const i = document.getElementById(id); if (i) i.addEventListener('keydown', (e) => { if (e.key === 'Enter') fn(); }); };
+  if (has) bindEnter('resPwdIn', () => UI.resUnlock());
+  else { bindEnter('resPwdNew', () => UI.resSetPwd()); bindEnter('resPwdNew2', () => UI.resSetPwd()); }
+};
+/** 首次设置密码 */
+UI.resSetPwd = () => {
+  const p1 = document.getElementById('resPwdNew'), p2 = document.getElementById('resPwdNew2');
+  if (!p1 || !p2) return;
+  if (p1.value.length < 4) { UI.toast('密码至少 4 位', 'warn'); return; }
+  if (p1.value !== p2.value) { UI.toast('两次输入不一致，请重新输入', 'warn'); return; }
+  localStorage.setItem(NK.LS_KEY + '-reslock', JSON.stringify({ pwd: UI.resHash(p1.value), updatedAt: NK.now() }));
+  UI.resUnlockNow();
+  UI.toast('密码已设置');
+  UI.renderResources();
+};
+/** 输入密码解锁 */
+UI.resUnlock = () => {
+  const st = UI.resStore();
+  const inp = document.getElementById('resPwdIn');
+  if (!st) { UI.toast('尚未设置密码，请先设置', 'warn'); UI.renderResources(); return; }
+  if (!inp) return;
+  if (UI.resHash(inp.value) === st.pwd) { UI.resUnlockNow(); UI.toast('解锁成功'); UI.renderResources(); }
+  else { UI.toast('密码错误，请重试', 'warn'); inp.value = ''; inp.focus(); }
+};
+/** 修改密码弹窗（需旧密码） */
+UI.resChangePwd = () => {
+  const st = UI.resStore();
+  UI.modal('修改访问密码',
+    `<div class="form-item"><label>当前密码</label><input id="resOld" type="password" placeholder="输入当前密码" autocomplete="off"></div>
+     <div class="form-item"><label>新密码</label><input id="resNew" type="password" placeholder="至少 4 位" autocomplete="off"></div>
+     <div class="form-item"><label>确认新密码</label><input id="resNew2" type="password" placeholder="再次输入" autocomplete="off"></div>
+     <div class="hint">${st ? '' : '当前尚未设置密码，可直接设置新密码'}</div>`,
+    `<button class="btn" onclick="UI.modalClose()">取消</button><button class="btn btn-accent" onclick="UI.resChangePwdDo()">保存</button>`,
+    { onMount(root) { const i = root.querySelector('#resNew'); if (i) i.focus(); } });
+};
+UI.resChangePwdDo = () => {
+  const st = UI.resStore();
+  const oldV = document.getElementById('resOld'), n1 = document.getElementById('resNew'), n2 = document.getElementById('resNew2');
+  if (!n1 || !n2) return;
+  if (st && UI.resHash(oldV.value) !== st.pwd) { UI.toast('当前密码不正确', 'warn'); return; }
+  if (n1.value.length < 4) { UI.toast('新密码至少 4 位', 'warn'); return; }
+  if (n1.value !== n2.value) { UI.toast('两次输入不一致', 'warn'); return; }
+  localStorage.setItem(NK.LS_KEY + '-reslock', JSON.stringify({ pwd: UI.resHash(n1.value), updatedAt: NK.now() }));
+  UI.modalClose();
+  UI.toast('密码已更新');
+  if (!UI.resUnlocked()) UI.renderResources();
+};
+/** 关闭密码保护弹窗（需旧密码） */
+UI.resClearPwd = () => {
+  const st = UI.resStore();
+  UI.modal('关闭密码保护',
+    `<div class="form-item"><label>当前密码</label><input id="resOld" type="password" placeholder="输入当前密码以确认关闭" autocomplete="off"></div>
+     <div class="hint">关闭后「查资源」将不再需要密码。${st ? '' : '当前本就未设置密码。'}</div>`,
+    `<button class="btn" onclick="UI.modalClose()">取消</button><button class="btn btn-danger" onclick="UI.resClearPwdDo()">关闭密码</button>`);
+};
+UI.resClearPwdDo = () => {
+  const st = UI.resStore();
+  if (!st) { UI.toast('当前未设置密码', 'warn'); UI.modalClose(); return; }
+  const oldV = document.getElementById('resOld');
+  if (UI.resHash(oldV.value) !== st.pwd) { UI.toast('当前密码不正确', 'warn'); return; }
+  localStorage.removeItem(NK.LS_KEY + '-reslock');
+  UI.toast('密码保护已关闭');
+  UI.modalClose();
+  UI.renderResources();
+};
+/** 忘记密码重置（设置页入口，二次确认后清除，任何人都可重新设置） */
+UI.resResetPwd = () => {
+  UI.confirm('确定要重置「查资源」密码吗？重置后任何人都可直接设置新密码进入。', () => {
+    localStorage.removeItem(NK.LS_KEY + '-reslock');
+    UI._resUnlocked = false;
+    try { sessionStorage.removeItem(NK.LS_KEY + '-resok'); } catch (e) {}
+    UI.toast('密码已重置，请重新设置');
+    UI.renderSettings();
+  }, '重置密码');
+};
+/** 从设置页跳转去首次设置密码 */
+UI.resSetupFromSettings = () => { UI.nav('resources'); };
+
+/* ============================================================
    工程师与职场
    ============================================================ */
 UI.renderResources = () => {
+  if (!UI.resUnlocked()) { UI.resLockHTML(); return; }
   const el = document.getElementById('view-resources');
   const q = (NK.resQ || '').trim().toLowerCase();
   const today = NK.today();
@@ -2916,6 +3032,16 @@ UI.renderSettings = () => {
           <button class="btn" onclick="UI.exportJSON()">导出完整备份</button>
         </div>
         <div class="hint" style="margin-top:10px">重置前请务必先导出备份。数据存储于浏览器 localStorage，清除浏览器数据或更换设备会导致数据丢失，请定期备份。</div>
+      </div></div>
+    <div class="card"><div class="card-head"><div class="card-title">查资源密码锁</div><span class="badge gray">工程师与职场页</span></div>
+      <div class="card-body">
+        <div style="font-size:12px;color:var(--text-2);margin-bottom:10px">当前状态：${UI.resStore() ? '<b style="color:var(--accent)">已开启</b>（会话内解锁有效）' : '<b>未开启</b>'}。开启后访问「工程师与职场」需输入密码，防止他人随手翻看。</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          ${UI.resStore()
+            ? `<button class="btn" onclick="UI.resChangePwd()">修改密码</button><button class="btn btn-danger" onclick="UI.resClearPwd()">关闭密码</button><button class="btn" onclick="UI.resResetPwd()">忘记密码 · 重置</button>`
+            : `<button class="btn btn-accent" onclick="UI.resSetupFromSettings()">开启密码保护</button>`}
+        </div>
+        <div class="hint" style="margin-top:10px">密码仅保存在本机浏览器（编码存储）。本应用为纯前端工具，此锁用于防止随手翻看，无法防住懂技术的人通过开发者工具绕过，请勿在其中存放敏感信息。</div>
       </div></div>`;
 
   // 绑定模式切换

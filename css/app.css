@@ -921,3 +921,36 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .res-lock-links { margin-top: 14px; font-size: 12px; color: var(--accent); cursor: pointer; }
 .res-lock-links span:hover { text-decoration: underline; }
 .res-lock-tip { margin-top: 16px; font-size: 11px; color: var(--text-3); }
+
+/* ===== 实时告警 · 一键清空 & 清空记录 ===== */
+.al-head-actions { display: inline-flex; align-items: center; gap: 6px; }
+.al-clear-btn { color: var(--purple); border-color: var(--border); }
+.al-clear-btn:hover:not([disabled]) { border-color: var(--purple); color: var(--purple); background: var(--accent-soft); }
+.al-clear-btn.is-disabled { opacity: .5; cursor: not-allowed; color: var(--text-3); }
+
+.al-more-wrap { position: relative; }
+.al-more-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; min-width: 150px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: var(--shadow-lg); padding: 5px; display: flex; flex-direction: column;
+}
+.al-more-item {
+  text-align: left; background: none; border: none; padding: 8px 12px; font-size: 12.5px;
+  color: var(--text); border-radius: 6px; cursor: pointer;
+}
+.al-more-item:hover { background: var(--accent-soft); color: var(--accent); }
+
+.al-confirm-t { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+.al-confirm-sub { font-size: 12px; color: var(--text-2); line-height: 1.7; margin-bottom: 12px; }
+.al-confirm-count { display: flex; gap: 8px; align-items: center; }
+
+.al-records { max-height: 60vh; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+.al-rec { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--bg-soft, #f8fafc); }
+.al-rec-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.al-rec-time { font-family: var(--mono); font-size: 12px; color: var(--text-2); }
+.al-rec-line { font-size: 12.5px; color: var(--text); margin-bottom: 6px; }
+.al-rec-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.al-rec-tag { font-size: 11px; padding: 1px 8px; border-radius: 8px; background: #eef1f5; color: var(--text-2); }
+.al-rec-tag.t-danger { background: var(--danger-soft); color: var(--danger); }
+.al-rec-tag.t-warn { background: var(--warn-soft); color: var(--warn); }
+.al-rec-tag.gray { background: #eef1f5; color: var(--text-3); }

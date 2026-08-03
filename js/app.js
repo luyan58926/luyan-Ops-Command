@@ -178,7 +178,7 @@ NK.FIXED_TASKS = [
   { id: 'TPL002', name: '中宏OA待办事项检查', category: '日常工作', type: '日常检查', frequency: '每日', requirement: '检查中宏OA中的待办事项和需要处理的内容。', priority: 'P3', trigger: '', fixedTime: '每日' },
   { id: 'TPL003', name: 'Symantec管理员摘要报告处理（Outlook）', category: '日常工作', type: '日常检查', frequency: '每日14:30', requirement: '通过Outlook查看并处理Symantec管理员摘要报告。', priority: 'P3', trigger: '', fixedTime: '14:30' },
   { id: 'TPL004', name: '联想SF工单系统检查', category: '日常工作', type: '日常检查', frequency: '每日下班前', requirement: '下班前检查联想SF工单系统中的工单录入和处理情况。', priority: 'P3', trigger: '', fixedTime: '下班前' },
-  { id: 'TPL005', name: 'HP打印机耗材提醒（Outlook）', category: '日常工作', type: '日常检查', frequency: '邮件触发', requirement: '收到HP打印机耗材提醒邮件后，根据设备和职场信息进行跟进。', priority: 'P3', trigger: '耗材提醒', fixedTime: '触发' },
+  { id: 'TPL005', name: 'HP打印机耗材邮件检查（Outlook）', category: '日常工作', type: '日常检查', frequency: '每日', requirement: '查看Outlook中是否收到HP打印机耗材提醒邮件。', priority: 'P3', trigger: '', fixedTime: '每日' },
   { id: 'TPL006', name: '监管机Windows登录失败告警（Outlook）', category: '安全告警', type: '安全告警', frequency: '邮件触发', requirement: '收到监管机Windows登录失败告警后，确认职场、原因和后续处理情况。', priority: 'P3', trigger: '登录失败告警', fixedTime: '触发' },
   { id: 'TPL011', name: '内部派单协调', category: '专项任务', type: '专项子任务', frequency: '收到请求', requirement: '收到内部派单请求后，查询对应职场和工程师，完成派单及后续协调。', priority: 'P3', trigger: '派单协调', fixedTime: '触发' },
   { id: 'TPL014', name: '联想月报', category: '日常工作', type: '日常检查', frequency: '每月', requirement: '每月初整理和完成联想月报。', priority: 'P3', trigger: '', fixedTime: '每月初' },
@@ -219,6 +219,7 @@ NK.initDB = () => {
     NK.mode = saved.mode === 'demo' ? 'demo' : 'work';
     NK.migrateFixedTasks();   // 固定任务升级 + 清理旧演示/预置数据（幂等）
     NK.migrateDispatchTaskSync(); // 派单关联任务同步（去重 + 状态对齐，幂等）
+    NK.migrateConsumableReminder(); // HP耗材提醒 → 每日邮件检查（幂等）
     NK.ensureFixedTasks();    // 生成今日/本月应出现的固定任务实例
     NK.save();
     return;
@@ -2175,6 +2176,66 @@ NK.migrateFixedTasks = () => {
   });
 
   NK.db.fixedMigrated = true;
+  NK.save();
+};
+
+/* ============================================================
+   HP耗材提醒 → 每日邮件检查（幂等迁移）
+   需求：HP耗材仅保留"每日检查一次Outlook"的日常提醒，
+   不再提供独立录入入口，也不再要求创建独立耗材任务。
+   - 所有旧 TPL005 任务统一改名/改频次为每日邮件检查
+   - 旧触发型耗材任务（非今日、未完成）一律归档为"已取消"，保留历史不删除
+   - 每日去重：同一 fixedDate 仅保留一条有效主记录，其余归档
+   - 已完成的旧耗材记录保留为历史，不影响今日工作流
+   安全可重复调用，绝不删除任何真实历史数据。
+   ============================================================ */
+NK.migrateConsumableReminder = () => {
+  const tpl = NK.FIXED_TASKS.find(t => t.id === 'TPL005');
+  if (!tpl) return;
+  const today = NK.today();
+  const nowIso = NK.now();
+  // 1) 统一旧 TPL005 任务的名称/频次（对齐新模板）
+  (NK.db.tasks || []).forEach(t => {
+    if (t.templateId === 'TPL005') {
+      t.name = tpl.name;
+      t.frequency = '每日';
+      t.fixedTime = '每日';
+      t.trigger = '';
+    }
+  });
+  // 2) 按 fixedDate（回退到 createdAt 日期）分组去重，保留一条有效主记录
+  const grp = {};
+  (NK.db.tasks || []).forEach(t => {
+    if (t.templateId !== 'TPL005' || t.status === '已完成') return;
+    const d = t.fixedDate || (t.createdAt || '').slice(0, 10);
+    if (!d) return;
+    (grp[d] = grp[d] || []).push(t);
+  });
+  Object.keys(grp).forEach(d => {
+    if (grp[d].length < 2) return;
+    // 非今日的旧记录：全部归档为已取消（历史保留）
+    if (d !== today) {
+      grp[d].forEach(t => {
+        if (t.status !== '已取消' && t.recordStatus !== '已删除') {
+          t.status = '已取消';
+          t.cancelReason = 'HP耗材提醒已改为每日检查Outlook，旧触发型耗材任务归档';
+          t.cancelledAt = t.cancelledAt || nowIso;
+          t.updatedAt = nowIso;
+        }
+      });
+      return;
+    }
+    // 今日多条的：保留最新一条有效，其余归档
+    const sorted = grp[d].slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    sorted.slice(1).forEach(t => {
+      if (t.status !== '已取消' && t.recordStatus !== '已删除') {
+        t.status = '已取消';
+        t.cancelReason = '同一天重复的耗材提醒，已归档';
+        t.cancelledAt = t.cancelledAt || nowIso;
+        t.updatedAt = nowIso;
+      }
+    });
+  });
   NK.save();
 };
 

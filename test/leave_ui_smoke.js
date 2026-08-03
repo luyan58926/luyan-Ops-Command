@@ -166,9 +166,9 @@ ok(quickHTML.includes('新建派单') && quickHTML.includes('快速记录') && q
 ok(quickHTML.includes('qc-lavender'), '登记休假卡使用薰衣草点缀样式');
 ok(quickHTML.includes('qc-primary'), '新建派单保持主卡样式');
 
-console.log('== 原功能保留：任务与告警耗材提醒入口 ==');
+console.log('== 需求变更：任务与告警已移除耗材提醒录入入口 ==');
 const tasksViewHTML = run(`(() => { UI.renderTasks(); return document.getElementById('view-tasks').innerHTML; })()`);
-ok(tasksViewHTML.includes('收到耗材提醒'), '任务与告警保留"收到耗材提醒"入口');
+ok(!tasksViewHTML.includes('收到耗材提醒'), '任务与告警不再显示"收到耗材提醒"录入入口');
 
 console.log('== 补位派单：职场快照与多职场选择 ==');
 // 所有工程师均负责 2+ 个职场 → 生产实际走"多职场选择"路径（单一职场路径为兜底）

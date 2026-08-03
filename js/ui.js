@@ -436,7 +436,7 @@ UI.renderHome = () => {
     tl.push({
       sort: time === '每日' ? '0800' : time === '下班前' ? '1800' : time === '每月' ? '2400' : (String(time).replace(':', '') || '0800'),
       time, kind: 'tpl', name: t.name, note: tpl ? tpl.requirement : '', pri: t.priority,
-      done, status: t.status, taskId: t.id,
+      done, status: t.status, taskId: t.id, templateId: t.templateId,
     });
   });
   // 2) 今日新建的任务（排除固定任务实例，避免与定时条目重复；只保留当前有效任务）
@@ -487,6 +487,7 @@ UI.renderHome = () => {
     </div>
     <div class="tl-body">
       ${tl.length ? `<div class="timeline">${tl.map(t => {
+        const isConsumable = t.kind === 'tpl' && t.templateId === 'TPL005' && t.taskId;
         const jump = t.kind === 'task'
           ? ` onclick="UI.nav('tasks')" title="点击查看任务"`
           : t.kind === 'tpl' && t.taskId
@@ -497,12 +498,16 @@ UI.renderHome = () => {
                 ? ` onclick="${t.click}" title="点击查看详情"`
                 : '';
         const clickAttr = jump ? ` class="tl-item ${t.done ? 'tl-done' : ''} tl-link"${jump}` : ` class="tl-item ${t.done ? 'tl-done' : ''}"`;
+        const cmplBtn = isConsumable
+          ? `<button class="btn btn-sm ${t.done ? 'btn-ghost' : 'btn-accent'}" style="margin-left:8px;vertical-align:middle" onclick="event.stopPropagation();UI.toggleConsumableDone('${t.taskId}',${t.done})">${t.done ? '↩ 撤销' : '✓ 标记完成'}</button>`
+          : '';
         return `<div ${clickAttr}>
           <span class="tl-time">${t.time}</span>
           ${t.type === 'dispatch' ? '<span class="badge gray" style="margin-right:4px">派</span>' : ''}
           <span class="tl-name">${t.done ? '✓ ' : ''}${NK.esc(t.name)}</span>
           ${t.pri ? `<span style="margin-left:6px">${UI.priBadge(t.pri)}</span>` : ''}
           ${t.sub ? `<div class="tl-note">${t.sub}</div>` : ''}
+          ${cmplBtn}
         </div>`;
       }).join('')}</div>` : '<div class="fc-empty"><div class="fc-empty-icon">📅</div><div class="fc-empty-text">今天还没有任务和定时事项<br>有安排随时记进来 ✨</div></div>'}
     </div>
@@ -539,6 +544,27 @@ UI.renderHome = () => {
       ${tlHTML}
     </div>
   `;
+};
+
+/** 首页时间轴 · HP耗材每日邮件检查：标记今日已完成 / 撤销完成
+ *  只切换当天提醒的完成状态，不弹表单、不要求填写任何内容、
+ *  不进入重点/告警/KPI。完成后当天不再提醒，第二天自动出现新的当日提醒。 */
+UI.toggleConsumableDone = (taskId, isDone) => {
+  const t = NK.getTask(taskId);
+  if (!t || t.templateId !== 'TPL005') return;
+  if (isDone) {
+    // 撤销完成
+    NK.setTaskStatus(t, '待处理');
+    t.doneAt = '';
+    UI.toast('已撤销，今天仍需检查一次Outlook 📬');
+  } else {
+    // 标记完成（不要求任何填写内容，不产生KPI）
+    NK.setTaskStatus(t, '已完成');
+    UI.toast('已记录今日完成，花姐辛苦了 ✓');
+  }
+  NK.save();
+  UI.renderHome();
+  UI.refreshBadges && UI.refreshBadges();
 };
 
 /* ============================================================
@@ -637,16 +663,6 @@ UI.leaveTodayDetail = () => {
 UI.resourcesJump = () => {
   UI.nav('resources');
   setTimeout(() => document.getElementById('resSearch') && document.getElementById('resSearch').focus(), 80);
-};
-
-/** 触发式固定任务快捷入口（耗材提醒 / 登录失败告警 / 内部派单协调） */
-UI.triggerFixed = (tplId) => {
-  const tpl = NK.FIXED_TASKS.find(t => t.id === tplId);
-  if (!tpl) return;
-  const task = NK.triggerTask(tplId);
-  if (!task) { UI.toast('触发失败，请重试', 'warn'); return; }
-  UI.toast(`已记录「${tpl.name}」待跟进 ✓`);
-  UI.nav('tasks');
 };
 
 /* ============================================================
@@ -2027,7 +2043,7 @@ UI.renderTasks = () => {
   const typeOpts = ['全部', ...NK.TASK_TYPES];
   const srcOpts = ['全部', '系统固定任务', '花姐手动新增', '安全告警', '派单自动关联', '专项任务', '已完成', '已取消', '已删除'];
   el.innerHTML = UI.pageHead('任务与告警', '任务闭环 · 告警驱动 · 固定任务每日/月度自动生成',
-    `<button class="btn" onclick="UI.triggerFixed('TPL005')">🖨️ 收到耗材提醒</button><button class="btn btn-accent" onclick="UI.taskCreate()">✚ 新建任务</button>`) +
+    `<button class="btn btn-accent" onclick="UI.taskCreate()">✚ 新建任务</button>`) +
     `<div class="filter-bar">
       <input class="fb-input" id="tkQ" placeholder="搜索编号/名称/职场/工程师…" value="${NK.esc(f.q || '')}">
       <select class="fb-select" id="tkStatus">${statusOpts.map(s => `<option ${(f.status || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>

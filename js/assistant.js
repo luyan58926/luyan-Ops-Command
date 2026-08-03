@@ -155,13 +155,23 @@
         let hit = 0, denom = words.length;
         words.forEach(w => { if (name.indexOf(w) !== -1) hit++; });
         // 若整词全未命中，退化为 2-gram 滑动匹配
+        let contiguousBonus = 0;
         if (hit === 0 && words.length) {
           const grams = [];
           for (let i = 0; i + 1 < kw.length; i++) grams.push(kw.slice(i, i + 2));
           denom = grams.length;
-          grams.forEach(g => { if (name.indexOf(g) !== -1) hit++; });
+          // 统计命中 + 最长连续命中游程（连续双字越吻合，任务名与查询越接近）
+          let run = 0, bestRun = 0;
+          grams.forEach(g => {
+            if (name.indexOf(g) !== -1) { hit++; run++; if (run > bestRun) bestRun = run; }
+            else run = 0;
+          });
+          // 弱匹配过滤：查询较长（>=5 双字）时，仅零星命中一两个通用双字（如"检查"）不视为有效候选，
+          // 避免 "完成HP耗材邮件检查" 误匹配到只含"检查"的无关任务。
+          if (grams.length >= 5 && hit < 2) return 0;
+          if (bestRun >= 2) contiguousBonus = bestRun * 6;
         }
-        if (denom) s += (hit / denom) * 40;
+        if (denom) s += (hit / denom) * 40 + contiguousBonus;
       }
       if (t.engineer && kw.indexOf(t.engineer) !== -1) s += 15;
       if (t.siteName && kw.indexOf(t.siteName) !== -1) s += 10;

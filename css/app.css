@@ -1108,3 +1108,41 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .al-line { display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap; }
 .al-sub { font-size: 11.5px; color: var(--text-2); margin-top: 4px; }
 .al-raw { font-size: 11px; color: var(--text-3); margin-top: 4px; font-style: italic; }
+
+/* ===== 派单供应商（源晨/亚北） ===== */
+/* 供应商标签：低饱和色，不使用风险色；源晨=灰蓝，亚北=灰紫，未标注=中性灰 */
+.sup-tag {
+  display: inline-block; padding: 2px 9px; border-radius: 10px;
+  font-size: 11px; font-weight: 600; line-height: 1.5; white-space: nowrap;
+}
+.sup-yc { background: #e8eefb; color: #5a7bb8; }
+.sup-yb { background: #f0eaf8; color: #8a6fb8; }
+.sup-na { background: #eef0f2; color: #8a9199; }
+
+/* 供应商分段选择按钮（新建派单 / 详情编辑） */
+.dp-supplier-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.dp-sup-btn {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 7px 16px; background: #fff; cursor: pointer; font-size: 13px;
+  color: var(--text-2); white-space: nowrap; transition: all .15s ease;
+}
+.dp-sup-btn:hover { border-color: var(--accent); color: var(--accent); }
+.dp-sup-btn.dp-sup-active {
+  background: var(--primary); border-color: var(--primary); color: #fff;
+}
+.dp-hint { font-size: 11px; color: var(--text-3); margin-top: 4px; }
+
+/* 供应商统计行（筛选区下方） */
+.sup-stats { font-size: 12px; color: var(--text-2); padding: 6px 2px 2px; }
+.sup-stats .sup-stats-item { margin-right: 14px; }
+.sup-stats .sup-stats-item .num { font-weight: 700; color: var(--text); }
+.sup-stats .sup-stats-item.is-yc .num { color: #5a7bb8; }
+.sup-stats .sup-stats-item.is-yb .num { color: #8a6fb8; }
+
+/* 详情供应商行 + 编辑框 */
+.dp-sup-val { font-weight: 600; color: var(--text); }
+.dp-sup-edit-box { border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 10px; margin-top: 6px; background: #fafbfc; }
+.dp-sup-edit-box .dp-supplier-row { margin-top: 0; }
+.dp-sup-actions { display: flex; gap: 8px; margin-top: 10px; }
+.dp-sup-actions .btn-mini { padding: 5px 12px; font-size: 12px; border-radius: var(--radius-sm); cursor: pointer; }
+.dp-sup-history { font-size: 11px; color: var(--text-3); margin-top: 8px; line-height: 1.6; }

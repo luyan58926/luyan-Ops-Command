@@ -10,7 +10,7 @@
  *   场景八 错误日期（开始晚于结束 → 提示，不执行查询）
  *   场景九 清除日期（恢复全部）
  *   场景十 历史未填写（设日期范围后不显示「未填写」记录）
- *   场景十一 列表字段精简（7 列）+ 新建派单（保留）
+ *   场景十一 列表字段精简（8 列，含供应商）+ 新建派单（保留）
  *   场景十二 数据保护（原字段保留 / 撤销删除不受影响）
  * 运行：node test/dispatch_visitdate_test.js
  */
@@ -125,15 +125,15 @@ const mkDispatch = (extra = {}) => run(`
 const today = run(`NK.today()`);
 const tomorrow = run(`(() => { const x = new Date(); x.setDate(x.getDate() + 1); return NK.fmtDate(x); })()`);
 
-console.log('== 场景一：列表字段精简为 7 列（派单编号|事项|职场|工程师|上门日期|状态|操作）==');
+console.log('== 场景一：列表字段精简为 8 列（派单编号|事项|职场|供应商|工程师|上门日期|状态|操作）==');
 reset();
 mkDispatch({ title: '青岛打印机' });
 let html = renderHTML();
-// 表头精确 7 列
+// 表头精确 8 列（新增「供应商」列）
 const headRow = (html.match(/<thead>.*?<\/thead>/s) || [''])[0];
 const headCols = (headRow.match(/<th>/g) || []).length;
-ok(headCols === 7, '表头列数=' + headCols + '（期望 7）');
-for (const col of ['派单编号', '事项', '职场', '工程师', '上门日期', '状态', '操作']) {
+ok(headCols === 8, '表头列数=' + headCols + '（期望 8）');
+for (const col of ['派单编号', '事项', '职场', '供应商', '工程师', '上门日期', '状态', '操作']) {
   ok(headRow.includes('<th>' + col + '</th>'), '表头含列「' + col + '」');
 }
 ok(!headRow.includes('优先级'), '表头不再显示「优先级」');

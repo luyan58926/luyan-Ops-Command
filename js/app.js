@@ -31,6 +31,51 @@ NK.PROJECT_STATUS = ['未开始', '进行中', '有风险', '等待反馈', '等
 NK.PROJECT_TYPES = ['季度巡检', 'Windows补丁更新', 'DLP修复', '职场搬迁', '职场撤场', '资产盘点', '安全整改', '新系统上线', '设备升级', '临时专项'];
 NK.SITE_STATUS = ['正常', '计划搬迁', '搬迁中', '计划撤场', '已撤场', '暂停服务'];
 
+/* ---------- 供应商（现场上门派单） ---------- */
+// 固定供应商：源晨、亚北。不可自由新增，不做复杂供应商管理页面。
+NK.SUPPLIERS = [
+  { id: 'yuanchen', name: '源晨' },
+  { id: 'yabei', name: '亚北' },
+];
+NK.SUPPLIER_MAP = NK.SUPPLIERS.reduce((m, s) => { m[s.id] = s; m[s.name] = s; return m; }, {});
+/** 校验供应商 id/名称是否为固定供应商之一；合法返回 {id,name}，否则返回 null */
+NK.normSupplier = (v) => {
+  if (!v) return null;
+  const s = NK.SUPPLIER_MAP[v] || null;
+  return s ? { id: s.id, name: s.name } : null;
+};
+/** 供应商 id → 名称；未标注/无效返回 '未标注' */
+NK.supplierName = (id) => {
+  if (!id) return '未标注';
+  const s = NK.SUPPLIER_MAP[id];
+  return s ? s.name : '未标注';
+};
+/** 共享的供应商过滤：派单中心与花姐助手必须使用同一套逻辑，保证数量一致。
+ *  rule: supplier 空/全部 → 全部；'未标注' → 无 supplierId 的派单；否则 → 匹配指定 id/名称。 */
+NK.filterBySupplier = (list, supplier) => {
+  const s = (supplier || '').trim();
+  if (!s || s === '全部' || s === '全部供应商') return list;
+  if (s === '未标注') return list.filter(d => !NK.getSupplierOf(d));
+  const ns = NK.normSupplier(s);
+  if (!ns) return list;
+  return list.filter(d => {
+    const cur = NK.getSupplierOf(d);
+    return cur && cur.id === ns.id;
+  });
+};
+/** 读取派单当前供应商（兼容数据可能只存 id 或只存 name 的情况） */
+NK.getSupplierOf = (d) => {
+  if (!d) return null;
+  if (d.supplierId) { const s = NK.SUPPLIER_MAP[d.supplierId]; if (s) return s; }
+  if (d.supplierName) { const s = NK.SUPPLIER_MAP[d.supplierName]; if (s) return s; }
+  return null;
+};
+/** 派单供应商显示名称：有→固定供应商名；无→未标注 */
+NK.dispatchSupplierLabel = (d) => {
+  const s = NK.getSupplierOf(d);
+  return s ? s.name : '未标注';
+};
+
 /* ---------- 工具函数 ---------- */
 NK.uid = (p) => p + String(Date.now()).slice(-6) + Math.floor(Math.random() * 90 + 10);
 NK.today = () => { const d = new Date(); return NK.fmtDate(d); };
@@ -162,7 +207,7 @@ NK.initDB = () => {
     sites: S.sites.map(s => ({ ...s })),
     handoverTemplates: NK.FIXED_TASKS.slice(),
     kpiRules: JSON.parse(JSON.stringify(S.kpiRules)),
-    templates: [{ id: 'TPL_MSG', name: '默认派单消息', active: true, content: '【{职场}现场支持派单】\n处理事项：{事项}\n优先级：{优先级}\n职场联系人：{联系人}\n联系电话：{电话}\n详细地址：{地址}\n负责工程师：{工程师}\n计划到场时间：{到场时间}\n期望完成时间：{完成时间}\n\n请收到后及时确认。\n到场后请反馈到场情况，处理完成后反馈处理结果。\n如涉及设备、资产、网络线路或现场变更，请同时提供相关信息及现场照片。' }],
+    templates: [{ id: 'TPL_MSG', name: '默认派单消息', active: true, content: '【{职场}现场支持派单】\n供应商：{供应商}\n处理事项：{事项}\n优先级：{优先级}\n职场联系人：{联系人}\n联系电话：{电话}\n详细地址：{地址}\n负责工程师：{工程师}\n计划到场时间：{到场时间}\n期望完成时间：{完成时间}\n\n请收到后及时确认。\n到场后请反馈到场情况，处理完成后反馈处理结果。\n如涉及设备、资产、网络线路或现场变更，请同时提供相关信息及现场照片。' }],
     // 运行时数据
     tasks: [], dispatches: [], projects: [], projectTasks: [],
     taskUpdates: [], kpiEvents: [], customerRatings: [], reminders: [], handovers: [],
@@ -449,6 +494,8 @@ NK.createDispatch = (data) => {
   const site = data.siteId ? NK.getSite(data.siteId) : null;
   const no = NK.nextNo('dispatch');
   const nowIso = NK.now();
+  // 供应商：正式派单必须指定（源晨/亚北）。历史/草稿可能为空→未标注。
+  const _sup = NK.normSupplier(data.supplier || data.supplierId || data.supplierName) || {};
   const dispatch = {
     id: NK.uid('D'),
     no,
@@ -456,6 +503,10 @@ NK.createDispatch = (data) => {
     desc: data.desc || '',
     type: data.type || '故障',
     priority: data.priority || 'P2',
+    supplierId: _sup.id || '',
+    supplierName: _sup.name || '',
+    supplierUpdatedAt: data.supplierUpdatedAt || '',
+    supplierHistory: data.supplierHistory || [],
     province: data.province || (site ? site.province : ''),
     city: data.city || (site ? site.city : ''),
     siteId: data.siteId || '',
@@ -532,6 +583,27 @@ NK.setVisitDate = (id, date) => {
   return d;
 };
 
+/** 设置派单供应商（记录修改历史，不改变派单状态/编号/工程师） */
+NK.setSupplier = (id, supplier) => {
+  const d = NK.getDispatch(id);
+  if (!d) return null;
+  const nowIso = NK.now();
+  const ns = NK.normSupplier(supplier);
+  const prev = NK.getSupplierOf(d);
+  const prevId = prev ? prev.id : '';
+  const nextId = ns ? ns.id : '';
+  if (prevId !== nextId) {
+    d.supplierHistory = d.supplierHistory || [];
+    d.supplierHistory.push({ from: prevId || '', fromName: prev ? prev.name : '未标注', to: nextId || '', toName: ns ? ns.name : '未标注', at: nowIso });
+    d.supplierId = nextId;
+    d.supplierName = ns ? ns.name : '';
+    d.supplierUpdatedAt = nowIso;
+    d.updatedAt = nowIso;
+  }
+  NK.save();
+  return d;
+};
+
 /**
  * 共享的上门日期范围过滤：派单中心与花姐助手必须使用同一套逻辑，保证数量一致。
  * 规则：开始≤上门日期≤结束；只填开始→该日及以后；只填结束→该日及以前；两端相同→单日；均为空→全部。
@@ -557,10 +629,12 @@ NK.renderDispatchMsg = (d) => {
   const tpl = NK.activeTpl();
   const site = d.siteId ? NK.getSite(d.siteId) : null;
   const cityLabel = d.siteName || d.city || d.siteName;
+  const supplier = NK.dispatchSupplierLabel(d);
   const map = {
     '{职场}': cityLabel,
     '{事项}': d.desc || d.title,
     '{优先级}': d.priority,
+    '{供应商}': supplier,
     '{联系人}': d.contactName || '（现场联系人见地址）',
     '{电话}': d.contactPhone || '—',
     '{地址}': d.address || '—',
@@ -568,7 +642,7 @@ NK.renderDispatchMsg = (d) => {
     '{到场时间}': d.planArrive ? `${d.planArrive}${d.planArriveTime ? ' ' + d.planArriveTime : ''}` : '尽快到场',
     '{完成时间}': d.planDone ? `${d.planDone}${d.planDoneTime ? ' ' + d.planDoneTime : ''}` : '请评估后回复',
   };
-  return tpl.content.replace(/\{职场\}|\{事项\}|\{优先级\}|\{联系人\}|\{电话\}|\{地址\}|\{工程师\}|\{到场时间\}|\{完成时间\}/g,
+  return tpl.content.replace(/\{职场\}|\{事项\}|\{优先级\}|\{供应商\}|\{联系人\}|\{电话\}|\{地址\}|\{工程师\}|\{到场时间\}|\{完成时间\}/g,
     (m) => map[m] || '');
 };
 NK.activeTpl = () => {

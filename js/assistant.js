@@ -315,10 +315,24 @@
     if (/今天.*情况|今日概览|今天怎么样|总体情况/.test(q)) {
       return Object.assign(intent, { intent: 'query', action: 'overview', targetModule: 'home', confidence: 0.85 });
     }
-    /* —— 查看派单（支持日期范围/关键词/状态组合；与派单中心共用 NK.filterByVisitRange） —— */
+    /* —— 供应商派单统计（本月/上月两个供应商分别多少条） —— */
+    const statsM = q.match(/(两个供应商|供应商.*分别|分别.*多少|每个供应商|各供应商|源晨.*亚北.*多少|亚北.*源晨.*多少)/);
+    if (/派单/.test(q) && statsM && !/撤销|删除|创建|新建|催办|登记|补位/.test(q)) {
+      const range = A.parseDispatchRange(q);
+      return Object.assign(intent, {
+        intent: 'query', action: 'dispatch_stats', targetModule: 'dispatch',
+        startDate: range ? range.start : '', endDate: range ? range.end : '',
+        confidence: 0.88, _rangeLabel: range ? range.label : '全部',
+      });
+    }
+    /* —— 查看派单（支持日期范围/关键词/状态/供应商组合；与派单中心共用 NK.filterByVisitRange + NK.filterBySupplier） —— */
     const viewDispatchM = q.match(/(?:查看|查询|找|给我看|帮我查|有几条|多少条|看看).*派单|派单.*(?:查看|查询|有哪几条|有哪些|列表|多少)/);
     if (/派单/.test(q) && viewDispatchM && !/撤销|删除|创建|新建|催办|登记|补位/.test(q)) {
       const range = A.parseDispatchRange(q);
+      // 供应商关键词（源晨/亚北）
+      let supplier = '';
+      const supHit = NK.SUPPLIERS.find(s => q.indexOf(s.name) !== -1);
+      if (supHit) supplier = supHit.name;
       // 关键词（城市/职场）
       let kw = '';
       const kwCandidates = ['青岛', '湖州', '威海', '上海', '苏州', '济南', '烟台', '北京', '南京', '天津', '合肥', '广州', '深圳'];
@@ -328,7 +342,7 @@
         // 从"的派单"前缀提取（如"本月青岛的派单"→"青岛"）
         const pref = (q.match(/(.+?)的?派单/) || [])[1];
         if (pref) {
-          const cleaned = (pref || '').replace(/查看|查询|找|给我看|帮我查|本月|上月|这个月|上个月|(\d{4}年)?\d{1,2}月|今天|明天|昨天|\d{1,2}月\d{1,2}日?号?|到|至|及|和|所有|全部/g, '').replace(/[，,。、\s]/g, '').trim();
+          const cleaned = (pref || '').replace(/查看|查询|找|给我看|帮我查|本月|上月|这个月|上个月|(\d{4}年)?\d{1,2}月|今天|明天|昨天|\d{1,2}月\d{1,2}日?号?|到|至|及|和|所有|全部|源晨|亚北/g, '').replace(/[，,。、\s]/g, '').trim();
           if (cleaned) kw = cleaned;
         }
       }
@@ -339,7 +353,7 @@
       return Object.assign(intent, {
         intent: 'query', action: 'dispatch', targetModule: 'dispatch',
         startDate: range ? range.start : '', endDate: range ? range.end : '',
-        title: kw, status, confidence: 0.88, _rangeLabel: range ? range.label : '',
+        title: kw, status, supplier, confidence: 0.88, _rangeLabel: range ? range.label : '',
       });
     }
 
@@ -416,13 +430,16 @@
     if (/创建派单|新建派单|派单|报障|报修/.test(q) && !/新增任务|创建任务|新任务|记得任务/.test(q)) {
       const eng = A.matchEngineer(q);
       const site = A.matchSite(q);
+      let supplier = '';
+      const supHit = NK.SUPPLIERS.find(s => q.indexOf(s.name) !== -1);
+      if (supHit) supplier = supHit.name;
       let reason = '';
       const after = q.split(/派单|报障|报修/).pop() || '';
       reason = after.replace(/^[，,：:]+/, '').replace(/。?$/, '').trim();
       return Object.assign(intent, {
         intent: 'action', action: 'dispatch_create', targetModule: 'dispatch',
         siteName: site ? site.name : '', personName: eng ? eng.name : '',
-        description: reason, confidence: site ? 0.85 : 0.7,
+        description: reason, supplier, confidence: site ? 0.85 : 0.7,
       });
     }
 
@@ -673,17 +690,20 @@
     }];
   };
 
-  /** 查询：派单列表（按日期范围/关键词/状态；与派单中心共用 NK.filterByVisitRange，数量一致） */
+  /** 查询：派单列表（按日期范围/关键词/状态/供应商；与派单中心共用 NK.filterByVisitRange + NK.filterBySupplier，数量一致） */
   A.q_dispatch = (intent) => {
     const vs = intent.startDate || '', ve = intent.endDate || '';
     const kw = intent.title || '';
     const status = intent.status || '';
+    const supplier = intent.supplier || '';
     const label = intent._rangeLabel || (vs && ve && vs === ve ? vs : (vs || ve) ? (vs || '…') + '至' + (ve || '…') : '全部');
     let list = NK.db.dispatches || [];
     // 默认排除已删除
     list = list.filter(d => d.recordStatus !== '已删除');
     // 日期范围（共享逻辑）
     list = NK.filterByVisitRange(list, vs, ve);
+    // 供应商（共享逻辑）
+    if (supplier) list = NK.filterBySupplier(list, supplier);
     // 关键词（编号/标题/职场/城市/工程师）
     if (kw) {
       list = list.filter(d => `${d.no || ''} ${d.title || ''} ${d.siteName || ''} ${d.city || ''} ${d.engineer || ''}`.indexOf(kw) !== -1);
@@ -691,15 +711,32 @@
     // 状态
     if (status) list = list.filter(d => d.status === status);
     if (!list.length) {
-      return [{ text: `花姐，${label}${kw ? '「' + kw + '」' : ''}${status ? '（' + status + '）' : ''}没有找到派单记录～` }];
+      return [{ text: `花姐，${label}${supplier ? '「' + supplier + '」' : ''}${kw ? '「' + kw + '」' : ''}${status ? '（' + status + '）' : ''}没有找到派单记录～` }];
     }
-    const head = `${label}${kw ? ' · ' + kw : ''}${status ? ' · ' + status : ''}共 ${list.length} 条派单：`;
-    const lines = list.slice(0, 12).map(d => `• ${d.no}｜${d.title}｜${d.siteName || d.city || '—'}｜${d.engineer || '—'}｜${d.visitDate || '未填写'}｜${d.status}`).join('\n');
+    const head = `${label}${supplier ? ' · ' + supplier : ''}${kw ? ' · ' + kw : ''}${status ? ' · ' + status : ''}共 ${list.length} 条派单：`;
+    const lines = list.slice(0, 12).map(d => `• ${d.no}｜${d.title}｜${d.siteName || d.city || '—'}｜${NK.dispatchSupplierLabel(d)}｜${d.engineer || '—'}｜${d.visitDate || '未填写'}｜${d.status}`).join('\n');
     const more = list.length > 12 ? `\n……等共 ${list.length} 条` : '';
     return [{
       text: head + '\n' + lines + more,
       actions: [{ label: '前往派单中心查看', act: 'nav', arg: 'dispatch' }],
     }];
+  };
+
+  /** 查询：本月/本月两个供应商分别有多少派单（轻量统计） */
+  A.q_dispatch_stats = (intent) => {
+    const vs = intent.startDate || '', ve = intent.endDate || '';
+    const label = intent._rangeLabel || (vs && ve && vs === ve ? vs : (vs || ve) ? (vs || '…') + '至' + (ve || '…') : '全部');
+    let list = NK.db.dispatches || [];
+    list = list.filter(d => d.recordStatus !== '已删除');
+    list = NK.filterByVisitRange(list, vs, ve);
+    const parts = [];
+    NK.SUPPLIERS.forEach(s => {
+      const c = list.filter(d => { const g = NK.getSupplierOf(d); return g && g.id === s.id; }).length;
+      parts.push(`${s.name}${c}条`);
+    });
+    const na = list.filter(d => !NK.getSupplierOf(d)).length;
+    if (na > 0) parts.push(`未标注${na}条`);
+    return [{ text: `花姐，${label}共 ${list.length} 条派单：${parts.join('，')}。需要我按供应商查看明细吗？`, actions: [{ label: '前往派单中心查看', act: 'nav', arg: 'dispatch' }] }];
   };
 
   /* ==========================================================
@@ -943,9 +980,9 @@
     const site = intent.siteName ? A.matchSite(intent.siteName) : null;
     const reason = intent.description || '';
     // 打开现有派单创建表单并预填职场与原因（siteId 触发自动选中 + prefillReason 预填原因）
-    UI.dispatchCreate(site ? site.id : undefined, { prefillReason: reason });
+    UI.dispatchCreate(site ? site.id : undefined, { prefillReason: reason, supplier: intent.supplier || '' });
     return [{
-      text: `花姐，已经帮你打开新建派单${site ? '，选中职场「' + NK.v.siteName(site.name) + '」' : ''}${reason ? '，派单原因已填：' + reason : ''}。\n请核对联系人、地址和工程师后确认生成。`,
+      text: `花姐，已经帮你打开新建派单${site ? '，选中职场「' + NK.v.siteName(site.name) + '」' : ''}${reason ? '，派单原因已填：' + reason : ''}${intent.supplier ? '，供应商已预选：' + intent.supplier : ''}。\n请核对联系人、地址、供应商和工程师后确认生成。`,
       actions: site ? [{ label: '前往派单', act: 'nav', arg: 'dispatch' }] : undefined,
     }];
   };
@@ -1151,6 +1188,7 @@
       notes: () => A.q_notes(),
       overview: () => A.q_overview(),
       dispatch: () => A.q_dispatch(intent),
+      dispatch_stats: () => A.q_dispatch_stats(intent),
     };
     if (intent.intent === 'query' && queryMap[intent.action]) {
       return queryMap[intent.action]();

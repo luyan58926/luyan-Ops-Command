@@ -668,10 +668,14 @@ UI.renderDispatch = (filterArg) => {
   if (f.overdue) list = list.filter(d => d.planDone && d.planDone < today && d.status !== '已闭环' && d.status !== '已取消');
   // 上门日期范围筛选：与花姐助手共享同一套逻辑（NK.filterByVisitRange），保证数量一致
   list = NK.filterByVisitRange(list, f.visitStart, f.visitEnd);
+  // 供应商筛选：与花姐助手共享同一套逻辑（NK.filterBySupplier），保证数量一致
+  list = NK.filterBySupplier(list, f.supplier);
   const _vs = (f.visitStart || '').trim(), _ve = (f.visitEnd || '').trim();
+  const _sup = (f.supplier || '').trim() || '全部供应商';
 
   const statusOpts = ['全部', '已删除', ...NK.DISPATCH_STATUS, '已取消', '已暂停', '已撤销'];
   const priOpts = ['全部', 'P1', 'P2', 'P3'];
+  const supOpts = ['全部供应商', '源晨', '亚北', '未标注'];
 
   // 上门日期显示标签：今天· / 明天· 需保留具体日期；无日期显示「未填写」
   const visitLabel = (d) => {
@@ -709,12 +713,39 @@ UI.renderDispatch = (filterArg) => {
   const _shortcutHTML = _rangeShortcuts.map(s =>
     `<button class="fb-chip ${_rangeActive === s.label ? 'on' : ''}" data-vs="${s.start}" data-ve="${s.end}" onclick="UI.setDispatchRange('${s.label}')">${s.label}</button>`).join('');
 
+  // 供应商标签：低饱和色区分（源晨=灰蓝，亚北=灰紫，未标注=中性灰），不使用风险色
+  const supLabel = (d) => {
+    const s = NK.getSupplierOf(d);
+    const name = s ? s.name : '未标注';
+    const cls = s && s.id === 'yuanchen' ? 'sup-yc' : s && s.id === 'yabei' ? 'sup-yb' : 'sup-na';
+    return `<span class="sup-tag ${cls}">${NK.esc(name)}</span>`;
+  };
+
+  // 供应商统计（轻量）：基于当前日期范围及其他筛选条件；选择单一供应商时只显示该供应商条数
+  const _allSupCount = list.length;
+  const _supStats = [];
+  if (_sup === '全部供应商' || !_sup) {
+    NK.SUPPLIERS.forEach(s => {
+      const c = list.filter(d => { const g = NK.getSupplierOf(d); return g && g.id === s.id; }).length;
+      _supStats.push(`${s.name}${c}条`);
+    });
+    const na = list.filter(d => !NK.getSupplierOf(d)).length;
+    if (na > 0) _supStats.push(`未标注${na}条`);
+  } else if (_sup !== '未标注') {
+    const c = list.filter(d => { const g = NK.getSupplierOf(d); return g && g.name === _sup; }).length;
+    _supStats.push(`${_sup}${c}条`);
+  }
+  const _supStatsHTML = _supStats.length ? `<div class="sup-stats">共${_allSupCount}条｜${_supStats.join('｜')}</div>` : '';
+
   el.innerHTML = UI.pageHead('派单中心', '全国派单 · 任务闭环 · 一次录入多处复用',
     `<button class="btn btn-accent" onclick="UI.dispatchCreate()">⇶ 新建派单</button>`) +
     `<div class="filter-bar">
       <input class="fb-input" id="dpQ" placeholder="搜索编号/标题/城市/工程师…" value="${NK.esc(f.q || '')}">
       <select class="fb-select" id="dpStatus">${statusOpts.map(s => `<option ${(f.status || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
       <select class="fb-select" id="dpPri">${priOpts.map(s => `<option ${(f.priority || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <select class="fb-select" id="dpSupplier" title="供应商">
+        ${supOpts.map(s => `<option ${_sup === s ? 'selected' : ''}>${s}</option>`).join('')}
+      </select>
       <span style="font-size:12px;color:var(--text-3);white-space:nowrap">上门日期</span>
       <input type="date" class="fb-date" id="dpVisitStart" value="${_vs || ''}" title="上门日期-开始">
       <span style="color:var(--text-3);font-size:12px">至</span>
@@ -725,8 +756,9 @@ UI.renderDispatch = (filterArg) => {
       <span class="spacer"></span>
       <span style="font-size:12px;color:var(--text-3)">共 ${list.length} 条</span>
     </div>
+    ${_supStatsHTML}
     <div class="card"><div class="table-wrap"><table class="tbl">
-      <thead><tr><th>派单编号</th><th>事项</th><th>职场</th><th>工程师</th><th>上门日期</th><th>状态</th><th>操作</th></tr></thead>
+      <thead><tr><th>派单编号</th><th>事项</th><th>职场</th><th>供应商</th><th>工程师</th><th>上门日期</th><th>状态</th><th>操作</th></tr></thead>
       <tbody>${list.length ? list.map(d => {
         const disp = NK.v.dispatch(d);
         const inactive = NK.dispatchInactive(d) || d.recordStatus === '已删除';
@@ -758,12 +790,13 @@ UI.renderDispatch = (filterArg) => {
           <td style="max-width:260px"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${NK.esc(d.title)}</div>
             <div style="color:var(--text-3);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${NK.esc((d.desc || '').slice(0, 40))}</div></td>
           <td>${NK.esc(disp.siteName || d.city)}</td>
+          <td style="white-space:nowrap">${supLabel(d)}</td>
           <td>${NK.esc(disp.engineer || '—')}</td>
           <td style="white-space:nowrap">${visitLabel(d)}</td>
           <td>${UI.statusBadge(d.status)}${d.urgentCount ? `<div style="font-size:10px;color:var(--warn)">已催${d.urgentCount}次</div>` : ''}${d.revokeReason ? `<div style="font-size:10px;color:var(--text-3)">撤销原因：${NK.esc(d.revokeReason)}</div>` : ''}</td>
           <td style="white-space:nowrap">${ops}</td>
         </tr>`;
-      }).join('') : UI.empty(showDeleted ? '回收站为空，暂无已删除派单' : '暂无派单，点击右上角「新建派单」开始', 7)}</tbody>
+      }).join('') : UI.empty(showDeleted ? '回收站为空，暂无已删除派单' : '暂无派单，点击右上角「新建派单」开始', 8)}</tbody>
     </table></div></div>`;
 
   const bind = () => {
@@ -779,6 +812,7 @@ UI.renderDispatch = (filterArg) => {
         q: document.getElementById('dpQ').value,
         status: document.getElementById('dpStatus').value,
         priority: document.getElementById('dpPri').value,
+        supplier: document.getElementById('dpSupplier').value,
         visitStart: vs,
         visitEnd: ve,
         overdue: document.getElementById('dpOverdue').checked,
@@ -788,6 +822,7 @@ UI.renderDispatch = (filterArg) => {
     document.getElementById('dpQ').addEventListener('input', NK.debounce ? NK.debounce(onFilter, 300) : onFilter);
     document.getElementById('dpStatus').onchange = onFilter;
     document.getElementById('dpPri').onchange = onFilter;
+    document.getElementById('dpSupplier').onchange = onFilter;
     document.getElementById('dpVisitStart').onchange = onFilter;
     document.getElementById('dpVisitEnd').onchange = onFilter;
     document.getElementById('dpOverdue').onchange = onFilter;
@@ -884,6 +919,14 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
         <div id="dpError" class="dp-error hidden"></div>
       </div>
       <div class="dp-field">
+        <label class="dp-label">供应商 <span style="color:var(--text-3);font-weight:400;font-size:11px">必选，本次上门派单发往哪家供应商</span></label>
+        <div class="dp-supplier-row" id="dpSupplierRow">
+          <button type="button" class="dp-sup-btn" data-sup="yuanchen">源晨</button>
+          <button type="button" class="dp-sup-btn" data-sup="yabei">亚北</button>
+        </div>
+        <div class="dp-hint">请选择源晨或亚北，生成派单前必须指定供应商</div>
+      </div>
+      <div class="dp-field">
         <label class="dp-label">派单原因</label>
         <textarea id="dpDesc" class="dp-textarea" placeholder="例如：3楼打印机无法打印，提示卡纸，请安排现场检查。" rows="3"></textarea>
         <div class="dp-hint">输入自然语言即可，无需填写标题</div>
@@ -947,6 +990,7 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
 
       let pickedSite = null;
       let candidatesShown = [];
+      let pickedSupplier = (prefillOpts.supplier && NK.normSupplier(prefillOpts.supplier)) ? NK.normSupplier(prefillOpts.supplier).id : '';
 
       const siteCandidateHTML = (s) =>
         `<div class="dpc-item" data-id="${s.id}" tabindex="0">
@@ -1082,6 +1126,23 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
       descInput.addEventListener('input', checkSubmit);
       visitInput.addEventListener('input', () => { if (visitInput.value) modalState.edited = true; });
 
+      // 供应商选择：源晨/亚北 分段按钮（必选，不默认）
+      const supBtns = root.querySelectorAll('.dp-sup-btn');
+      const applySupActive = () => {
+        supBtns.forEach(b => {
+          const on = pickedSupplier && b.dataset.sup === pickedSupplier;
+          b.classList.toggle('dp-sup-active', !!on);
+        });
+      };
+      supBtns.forEach(btn => {
+        btn.onclick = () => {
+          pickedSupplier = btn.dataset.sup;
+          modalState.edited = true;
+          applySupActive();
+        };
+      });
+      if (pickedSupplier) applySupActive();
+
       // 上门日期快捷选择：今天/明天/选择日期/暂不确定（默认明天）
       const visitBtns = root.querySelectorAll('.dp-visit-btn');
       const todayV = NK.today();
@@ -1122,6 +1183,23 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
       submitBtn.onclick = () => {
         if (!pickedSite || !descInput.value.trim()) return;
 
+        // 供应商必选：未选择则提示，不自动默认，不生成正式派单
+        if (!pickedSupplier) {
+          UI.toast('请选择本次派单供应商。', 'warn');
+          return;
+        }
+        const supObj = NK.normSupplier(pickedSupplier) || {};
+        const supName = supObj.name || '';
+
+        // 生成前确认摘要：展示供应商/职场/上门日期，花姐最终确认后再创建
+        const _confirmSup = supName || '未标注';
+        const _confirmVisit = visitInput.value || '未填写';
+        UI.confirm(`确认本次派单信息？<br><br>供应商：<b>${_confirmSup}</b><br>职场：${NK.esc(NK.v.siteName(pickedSite.name))}<br>上门日期：${_confirmVisit}`, () => {
+          doCreate();
+        }, '生成派单');
+        return;
+
+        function doCreate() {
         const reason = descInput.value.trim();
         const title = NK.v.siteName(pickedSite.name) +
           (reason.includes('打印') ? '打印机' :
@@ -1137,6 +1215,7 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
           type: '故障',
           source: '花姐手动创建',
           visitDate: visitInput.value,
+          supplier: supName,
         });
 
         // 补位派单：派单创建成功后关联休假记录，更新补位状态为"已创建派单"
@@ -1159,7 +1238,9 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
         wrap.classList.add('hidden');
         modalState.edited = false; // 已保存，成功页关闭不拦截
         root.querySelector('#dpSuccessTitle').textContent =
-          `花姐，${NK.v.siteName(pickedSite.name)}的派单已经生成 ✓`;
+          supName
+            ? `花姐，${supName}的派单已经创建好了 ✓`
+            : `花姐，${NK.v.siteName(pickedSite.name)}的派单已经生成 ✓`;
         root.querySelector('#dpSuccessSub').textContent =
           pickedSite.defaultEngineer
             ? `正在等待 ${NK.v.engName(pickedSite.defaultEngineer)} 确认`
@@ -1179,6 +1260,7 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
           UI.modalClose();
           UI.dispatchCreate();
         };
+        } // end doCreate
       };
 
       // [close] 已由统一弹窗机制绑定
@@ -1247,11 +1329,21 @@ UI.dispatchDetail = (id) => {
       <div class="card"><div class="card-head"><div class="card-title">职场与联系人</div></div><div class="card-body">
         <div class="detail-grid">
           <div class="dg-item"><span class="dg-label">职场</span><span class="dg-val">${NK.esc(disp.siteName || d.city || '—')}</span></div>
+          <div class="dg-item"><span class="dg-label">供应商</span><span class="dg-val" id="ddSupVal">${NK.dispatchSupplierLabel(d) === '未标注' ? '<span style="color:var(--text-3)">未标注</span>' : NK.dispatchSupplierLabel(d)}</span>
+            <button class="btn btn-sm" id="ddSupEdit" style="margin-left:4px">${NK.dispatchSupplierLabel(d) === '未标注' ? '补充供应商' : '修改供应商'}</button></div>
           <div class="dg-item"><span class="dg-label">地址</span><span class="dg-val">${NK.esc(disp.address || '—')}</span></div>
           <div class="dg-item"><span class="dg-label">联系人</span><span class="dg-val">${NK.esc(disp.contactName || '—')} ${NK.esc(disp.contactPhone || '')}</span></div>
           <div class="dg-item"><span class="dg-label">支持方式</span><span class="dg-val">${disp.supportType || '—'}${disp.needDispatch ? ' · 需派单' : ''}</span></div>
           <div class="dg-item"><span class="dg-label">工程师</span><span class="dg-val">${NK.esc(disp.engineer || '—')}</span></div>
           <div class="dg-item"><span class="dg-label">工单号</span><span class="dg-val">${NK.esc(d.workNo || '—')}</span></div>
+        </div>
+        <div id="ddSupEditBox" style="display:none;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line,#e5e5e5)">
+          <div style="display:flex;gap:8px;align-items:center">
+            ${NK.SUPPLIERS.map(s => `<button type="button" class="dp-sup-btn" data-sup="${s.id}" data-name="${s.name}">${s.name}</button>`).join('')}
+            <button class="btn btn-sm btn-accent" id="ddSupSave">保存</button>
+            <button class="btn btn-sm" id="ddSupCancel">取消</button>
+          </div>
+          ${d.supplierHistory && d.supplierHistory.length ? `<div style="margin-top:6px;font-size:11px;color:var(--text-3)">修改历史：${d.supplierHistory.map(h => `${h.fromName} → ${h.toName}（${NK.fmtDT(new Date(h.at))}）`).join('；')}</div>` : ''}
         </div>
       </div></div>
       <div class="card"><div class="card-head"><div class="card-title">上门日期</div></div><div class="card-body">
@@ -1335,6 +1427,50 @@ UI.dispatchDetail = (id) => {
       }
       if (root.querySelector('#ddVisitCancel')) {
         root.querySelector('#ddVisitCancel').onclick = () => { if (visitBox) visitBox.style.display = 'none'; };
+      }
+
+      // 供应商补充/修改（带确认，保留修改历史，不改变编号/工程师/状态）
+      const supEditBtn = root.querySelector('#ddSupEdit');
+      const supBox = root.querySelector('#ddSupEditBox');
+      const supVal = root.querySelector('#ddSupVal');
+      let supPick = '';
+      const supBtns2 = root.querySelectorAll('#ddSupEditBox .dp-sup-btn');
+      const applySup2 = () => {
+        supBtns2.forEach(b => b.classList.toggle('dp-sup-active', !!supPick && b.dataset.sup === supPick));
+      };
+      supBtns2.forEach(b => {
+        b.onclick = () => { supPick = b.dataset.sup; applySup2(); };
+      });
+      const refreshSupVal = () => {
+        const cur = NK.getDispatch(d.id);
+        const curSup = cur ? NK.dispatchSupplierLabel(cur) : NK.dispatchSupplierLabel(d);
+        if (supVal) supVal.innerHTML = curSup === '未标注' ? '<span style="color:var(--text-3)">未标注</span>' : NK.esc(curSup);
+        if (supEditBtn) supEditBtn.textContent = curSup === '未标注' ? '补充供应商' : '修改供应商';
+      };
+      if (supEditBtn) supEditBtn.onclick = () => { if (supBox) { supBox.style.display = 'block'; supPick = ''; applySup2(); } };
+      if (root.querySelector('#ddSupCancel')) {
+        root.querySelector('#ddSupCancel').onclick = () => { if (supBox) supBox.style.display = 'none'; };
+      }
+      if (root.querySelector('#ddSupSave')) {
+        root.querySelector('#ddSupSave').onclick = () => {
+          if (!supPick) { UI.toast('请选择供应商（源晨或亚北）', 'warn'); return; }
+          const curSup = NK.dispatchSupplierLabel(NK.getDispatch(d.id) || d);
+          const ns = NK.normSupplier(supPick);
+          if (!ns) return;
+          // 修改确认：确定将供应商从 X 修改为 Y 吗？
+          const doSave = () => {
+            NK.setSupplier(d.id, ns.id);
+            refreshSupVal();
+            if (supBox) supBox.style.display = 'none';
+            UI.toast('花姐，供应商已更新 ✨', 'ok');
+            UI.renderDispatch();
+          };
+          if (curSup !== '未标注' && curSup !== ns.name) {
+            UI.confirm(`确定将供应商从“${curSup}”修改为“${ns.name}”吗？`, doSave, '确认修改');
+          } else {
+            doSave();
+          }
+        };
       }
     },
   });

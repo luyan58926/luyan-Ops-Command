@@ -97,18 +97,59 @@ NK.notesAutoTitle = (content) => {
   return firstLine.length > 20 ? firstLine.slice(0, 20) + '\u2026' : (firstLine || '快速记录 ' + NK.fmtDT(new Date()));
 };
 
+/* ---------- 固定任务白名单（唯一正式固定任务，9项）---------- */
+// 来源标记：系统固定任务。仅此白名单内的任务属于正式固定任务，
+// 手动新增任务 / 派单关联任务不受白名单限制。
+NK.FIXED_TASKS = [
+  { id: 'TPL001', name: '宏1站、Teams、Outlook用户消息跟进', category: '日常工作', type: '日常检查', frequency: '每日', requirement: '查看宏1站、Teams及Outlook中的用户消息、反馈和待跟进事项。', priority: 'P3', trigger: '', fixedTime: '每日' },
+  { id: 'TPL002', name: '中宏OA待办事项检查', category: '日常工作', type: '日常检查', frequency: '每日', requirement: '检查中宏OA中的待办事项和需要处理的内容。', priority: 'P3', trigger: '', fixedTime: '每日' },
+  { id: 'TPL003', name: 'Symantec管理员摘要报告处理（Outlook）', category: '日常工作', type: '日常检查', frequency: '每日14:30', requirement: '通过Outlook查看并处理Symantec管理员摘要报告。', priority: 'P3', trigger: '', fixedTime: '14:30' },
+  { id: 'TPL004', name: '联想SF工单系统检查', category: '日常工作', type: '日常检查', frequency: '每日下班前', requirement: '下班前检查联想SF工单系统中的工单录入和处理情况。', priority: 'P3', trigger: '', fixedTime: '下班前' },
+  { id: 'TPL005', name: 'HP打印机耗材提醒（Outlook）', category: '日常工作', type: '日常检查', frequency: '邮件触发', requirement: '收到HP打印机耗材提醒邮件后，根据设备和职场信息进行跟进。', priority: 'P3', trigger: '耗材提醒', fixedTime: '触发' },
+  { id: 'TPL006', name: '监管机Windows登录失败告警（Outlook）', category: '安全告警', type: '安全告警', frequency: '邮件触发', requirement: '收到监管机Windows登录失败告警后，确认职场、原因和后续处理情况。', priority: 'P3', trigger: '登录失败告警', fixedTime: '触发' },
+  { id: 'TPL011', name: '内部派单协调', category: '专项任务', type: '专项子任务', frequency: '收到请求', requirement: '收到内部派单请求后，查询对应职场和工程师，完成派单及后续协调。', priority: 'P3', trigger: '派单协调', fixedTime: '触发' },
+  { id: 'TPL014', name: '联想月报', category: '日常工作', type: '日常检查', frequency: '每月', requirement: '每月初整理和完成联想月报。', priority: 'P3', trigger: '', fixedTime: '每月初' },
+  { id: 'TPL015', name: '联想内部月会', category: '日常工作', type: '日常检查', frequency: '月报完成后', requirement: '联想月报完成后，安排或准备当月内部月会。', priority: 'P3', trigger: '', fixedTime: '月报完成后' },
+];
+NK.FIXED_DAILY = () => NK.FIXED_TASKS.filter(t => ['每日', '每日14:30', '每日下班前'].includes(t.frequency));
+NK.FIXED_MONTHLY = () => NK.FIXED_TASKS.filter(t => ['每月', '月报完成后'].includes(t.frequency));
+NK.FIXED_TRIGGER = () => NK.FIXED_TASKS.filter(t => ['邮件触发', '收到请求'].includes(t.frequency));
+
+/** 任务来源归类键（用于任务页来源筛选） */
+NK.taskSourceKey = (t) => {
+  if (t.type === '安全告警') return '安全告警';
+  if (t.source === '系统固定任务') return '系统固定任务';
+  if (t.projectId) return '专项任务';
+  if (t.dispatchId) return '派单自动关联';
+  return '花姐手动新增';   // 手动录入 / 花姐手动新增 归为手动
+};
+/** 任务来源显示标签 */
+NK.taskSourceLabel = (t) => {
+  const map = { '系统固定任务': '固定任务', '花姐手动新增': '手动任务', '安全告警': '安全告警', '派单自动关联': '派单任务', '专项任务': '专项任务' };
+  return map[NK.taskSourceKey(t)] || t.source || '—';
+};
+
 /* ---------- 初始化 ---------- */
 NK.initDB = () => {
   const saved = NK.load();
-  if (saved && saved.version === 1 && saved.seedHash === NK.seedHash()) {
+  const S = window.SEED_DATA;
+  // 复用判定：基础资料（工程师/职场）匹配即可复用存档；
+  // 固定任务与旧演示数据交由 NK.migrateFixedTasks() 幂等升级，绝不因模板数量变化而丢弃用户真实数据。
+  const baseMatch = saved && typeof saved === 'object' && saved.version >= 1 &&
+    saved.engineers && saved.sites &&
+    saved.engineers.length === S.engineers.length &&
+    saved.sites.length === S.sites.length;
+  if (baseMatch) {
     NK.db = saved;
     NK.db.quickNotes = NK.db.quickNotes || [];
     NK.mode = saved.mode === 'demo' ? 'demo' : 'work';
+    NK.migrateFixedTasks();   // 固定任务升级 + 清理旧演示/预置数据（幂等）
+    NK.ensureFixedTasks();    // 生成今日/本月应出现的固定任务实例
+    NK.save();
     return;
   }
-  const S = window.SEED_DATA;
   NK.db = {
-    version: 1,
+    version: 2,
     seedHash: NK.seedHash(),
     mode: 'work',
     engineers: S.engineers.map(e => ({
@@ -117,7 +158,7 @@ NK.initDB = () => {
       onsiteRaw: e.onsiteRaw || '', remoteRaw: e.remoteRaw || '',
     })),
     sites: S.sites.map(s => ({ ...s })),
-    handoverTemplates: S.handoverTemplates.map(t => ({ ...t })),
+    handoverTemplates: NK.FIXED_TASKS.slice(),
     kpiRules: JSON.parse(JSON.stringify(S.kpiRules)),
     templates: [{ id: 'TPL_MSG', name: '默认派单消息', active: true, content: '【{职场}现场支持派单】\n处理事项：{事项}\n优先级：{优先级}\n职场联系人：{联系人}\n联系电话：{电话}\n详细地址：{地址}\n负责工程师：{工程师}\n计划到场时间：{到场时间}\n期望完成时间：{完成时间}\n\n请收到后及时确认。\n到场后请反馈到场情况，处理完成后反馈处理结果。\n如涉及设备、资产、网络线路或现场变更，请同时提供相关信息及现场照片。' }],
     // 运行时数据
@@ -128,15 +169,16 @@ NK.initDB = () => {
     createdAt: NK.now(),
     // 实时告警清空状态（一键清空）：只标记告警提示，绝不删除业务数据
     alertState: { cooldownHours: 2, cleared: {}, records: [] },
+    fixedMigrated: true,
   };
   // 兼容旧存档：补齐 alertState 字段
   NK.db.alertState = NK.db.alertState || { cooldownHours: 2, cleared: {}, records: [] };
-  NK.seedDemoData();
+  NK.ensureFixedTasks();
   NK.save();
 };
 NK.seedHash = () => {
   const S = window.SEED_DATA;
-  return (S.engineers.length + '-' + S.sites.length + '-' + S.handoverTemplates.length);
+  return (S.engineers.length + '-' + S.sites.length);
 };
 /** 生成编号 */
 NK.nextNo = (type) => {
@@ -393,6 +435,10 @@ NK.setTaskStatus = (t, status) => {
   t.status = status; t.updatedAt = nowIso;
   if (status === '已完成') t.doneAt = nowIso;
   NK.save();
+  // 完成当月联想月报后，自动生成当月联想内部月会任务（同月去重）
+  if (status === '已完成' && t.templateId === 'TPL014' && t.fixedYM) {
+    NK.ensureFixedMonthly(NK.FIXED_TASKS.find(x => x.id === 'TPL015'), t.fixedYM);
+  }
 };
 NK.updateTaskFeedback = (t, { feedback, nextAction, result, acceptResult }) => {
   if (feedback != null) t.latestFeedback = feedback;
@@ -403,23 +449,85 @@ NK.updateTaskFeedback = (t, { feedback, nextAction, result, acceptResult }) => {
   NK.save();
 };
 
-/** 生成今日日常任务（未完成的补生成） */
-NK.ensureDailyTasks = () => {
+/* ============================================================
+   固定任务实例生成
+   规则：
+   · 每日类（每日/每日14:30/每日下班前）→ 每天生成一条今日实例（fixedDate=today）
+   · 月度类（每月/月报完成后）        → 按「年月+模板ID」去重，同月只生成一次（fixedYM=ym）
+   · 触发类（邮件触发/收到请求）      → 不自动生成，仅由花姐手动点击快捷入口触发（triggerTask）
+   · 每日任务次日重置：当天实例完成后标记当日完成，第二天重新生成新实例，绝不堆叠。
+   ============================================================ */
+NK.ensureFixedTasks = () => {
   const today = NK.today();
-  const daily = NK.db.handoverTemplates.filter(t => (t.frequency || '').includes('每日'));
-  daily.forEach(tpl => {
-    const exists = NK.db.tasks.find(t => t.source === '日常模板' && t.templateId === tpl.id && t.createdAt.slice(0, 10) === today);
-    if (!exists) {
-      const task = NK.createTask({
-        name: tpl.name, type: tpl.type, priority: tpl.priority,
-        source: '日常模板', nextAction: tpl.requirement || '',
-        status: '待处理',
-      });
-      task.templateId = tpl.id;
-      task.updatedAt = NK.now();
-    }
-  });
+  const ym = today.slice(0, 7);
+  NK.FIXED_DAILY().forEach(tpl => NK.ensureFixedDaily(tpl, today));
+  NK.FIXED_MONTHLY().forEach(tpl => NK.ensureFixedMonthly(tpl, ym));
   NK.save();
+};
+
+/** 每日类固定任务：仅生成一条 fixedDate=today 的实例（去重按 模板+当天日期） */
+NK.ensureFixedDaily = (tpl, today) => {
+  const exists = NK.db.tasks.find(t =>
+    t.source === '系统固定任务' && t.templateId === tpl.id && t.fixedDate === today);
+  if (exists) return exists;
+  const task = NK.createTask({
+    name: tpl.name, type: tpl.type, priority: tpl.priority,
+    source: '系统固定任务', nextAction: tpl.requirement || '',
+    status: '待处理',
+  });
+  task.templateId = tpl.id;
+  task.fixedDate = today;      // 每日实例的日期，用于次日重置与去重
+  task.frequency = tpl.frequency || '';
+  task.fixedTime = tpl.fixedTime || '';   // '每日' | '14:30' | '下班前'
+  task.updatedAt = NK.now();
+  return task;
+};
+
+/** 月度类固定任务：按「年月+模板ID」去重，同月只生成一次 */
+NK.ensureFixedMonthly = (tpl, ym) => {
+  // 联想内部月会：当月月报（TPL014）完成前不生成
+  if (tpl.id === 'TPL015') {
+    const report = NK.db.tasks.find(t => t.templateId === 'TPL014' && t.fixedYM === ym);
+    if (!report || report.status !== '已完成') return null;
+  }
+  const exists = NK.db.tasks.find(t =>
+    t.source === '系统固定任务' && t.templateId === tpl.id && t.fixedYM === ym);
+  if (exists) return exists;
+  const task = NK.createTask({
+    name: tpl.name, type: tpl.type, priority: tpl.priority,
+    source: '系统固定任务', nextAction: tpl.requirement || '',
+    status: '待处理',
+  });
+  task.templateId = tpl.id;
+  task.fixedYM = ym;           // 月度实例的年月，用于同月去重
+  task.frequency = tpl.frequency || '';
+  task.fixedTime = tpl.fixedTime || '';
+  task.updatedAt = NK.now();
+  return task;
+};
+
+/** 触发式固定任务入口：当天已有该模板的待处理实例则复用，否则新建一条今日实例 */
+NK.triggerTask = (tplId) => {
+  const tpl = NK.FIXED_TASKS.find(t => t.id === tplId);
+  if (!tpl) return null;
+  const today = NK.today();
+  let task = NK.db.tasks.find(t =>
+    t.source === '系统固定任务' && t.templateId === tplId &&
+    t.status !== '已完成' && (t.fixedDate === today || t.createdAt.slice(0, 10) === today));
+  if (!task) {
+    task = NK.createTask({
+      name: tpl.name, type: tpl.type, priority: tpl.priority,
+      source: '系统固定任务', nextAction: tpl.requirement || '',
+      status: '待处理',
+    });
+    task.templateId = tplId;
+    task.fixedDate = today;
+    task.frequency = tpl.frequency || '';
+    task.fixedTime = tpl.fixedTime || '';
+    task.updatedAt = NK.now();
+  }
+  NK.save();
+  return task;
 };
 
 /* ============================================================
@@ -1208,67 +1316,63 @@ NK.assistantReply = (q) => {
 };
 
 /* ============================================================
-   演示数据
+   固定任务迁移（幂等）
+   只在首次升级 / 模板调整时执行：把旧存档里的固定任务、旧演示数据
+   一次性收敛到 9 项白名单，并清理旧预置/测试/演示任务，绝不误删
+   花姐手动新增的真实数据。可安全重复调用。
    ============================================================ */
-NK.seedDemoData = () => {
-  const today = NK.today();
-  const engs = NK.db.engineers;
-  const sites = NK.db.sites;
-  const mk = (n) => today.slice(0, 8) + String(Math.abs(n) % 100).padStart(2, '0');
-  // 演示派单 3 条（其中湖州一条，用于演示核心场景）
-  const huSite = sites.find(s => s.city === '湖州');
-  if (huSite) {
-    const d1 = NK.createDispatch({
-      title: '湖州打印机故障处理', desc: '湖州职场3楼打印机无法打印，报错卡纸。',
-      type: '故障', priority: 'P1', siteId: huSite.id, engineer: '沈煜钦',
-      requireConfirmBy: today, planArrive: today, planDone: today,
-    });
-    d1.status = '跟进中'; d1.sentAt = new Date(Date.now() - 1000 * 3600 * 2).toISOString();
-    d1.latestFeedback = '已到场检查，硒鼓卡纸，正在更换。';
-    d1.nextAction = '更换硒鼓后测试打印';
-    d1.updatedAt = NK.now();
-    NK.getTask(d1.taskId).status = '处理中';
-  }
-  const njSites = sites.filter(s => s.city === '南京');
-  if (njSites.length) {
-    const d2 = NK.createDispatch({
-      title: '南京职场网络异常排查', desc: '河西职场用户反馈网络间歇性中断。',
-      type: '故障', priority: 'P2', siteId: njSites[0].id, engineer: '黄青涵',
-      requireConfirmBy: today, planDone: today,
-    });
-    d2.status = '已发送';
-    d2.sentAt = new Date(Date.now() - 2 * 3600000).toISOString(); // 花姐已发送2小时
-  }
-  const bjSite = sites.find(s => s.city === '北京');
-  if (bjSite) {
-    const d3 = NK.createDispatch({
-      title: '北京东方广场用户新机部署', desc: '新入职员工电脑装机与网络配置。',
-      type: '用户请求', priority: 'P3', siteId: bjSite.id, engineer: '李亚男',
-      planDone: today,
-    });
-    d3.status = '待花姐验收'; d3.sentAt = d3.createdAt; d3.startAt = d3.createdAt;
-    d3.latestFeedback = '已完成装机与配置，用户验收通过。';
-    d3.result = '装机完成，网络正常。';
-    NK.getTask(d3.taskId).status = '待验收';
-  }
-  // 专项：季度巡检
-  const p1 = NK.createProject({
-    name: '2026年Q3季度巡检', type: '季度巡检', goal: '9名驻场工程师完成全国职场季度巡检，提交机房/监管机照片及巡检单。',
-    startDate: today.slice(0, 8) + '01', dueDate: today.slice(0, 8) + '29', owner: '花姐',
-    participants: engs.map(e => e.name), autoTasks: NK.quarterlyInspectTasks(),
-    status: '进行中',
+NK.migrateFixedTasks = () => {
+  const whitelistIds = NK.FIXED_TASKS.map(t => t.id);   // 9 项白名单
+  const oldTemplateIds = NK.db.handoverTemplates || [];
+
+  /* 1) 固定任务模板升级为 9 项白名单 */
+  NK.db.handoverTemplates = NK.FIXED_TASKS.slice();
+
+  /* 2) 清理旧演示派单（种子演示数据标题精确匹配）及其关联任务 */
+  const demoDispatchTitles = ['湖州打印机故障处理', '南京职场网络异常排查', '北京东方广场用户新机部署'];
+  const demoDispatchIds = new Set();
+  NK.db.dispatches = (NK.db.dispatches || []).filter(d => {
+    if (demoDispatchTitles.includes(d.title)) { demoDispatchIds.add(d.id); return false; }
+    return true;
   });
-  NK.updateProjectProgress(p1);
-  // 专项：Windows补丁
-  const p2 = NK.createProject({
-    name: 'Windows 6月补丁更新', type: 'Windows补丁更新', goal: '所有工程师完成6月补丁安装并更新在线表格。',
-    startDate: '2026-07-22', dueDate: '2026-07-27', owner: '花姐',
-    participants: engs.map(e => e.name), status: '进行中',
+
+  /* 3) 清理演示专项（Q3季度巡检 / Windows补丁更新）及其子任务 */
+  const demoProjectIds = new Set();
+  const demoProjectNames = ['2026年Q3季度巡检', 'Windows 6月补丁更新', 'Q3季度巡检', '6月补丁更新'];
+  NK.db.projects = (NK.db.projects || []).filter(p => {
+    if (demoProjectNames.includes(p.name)) { demoProjectIds.add(p.id); return false; }
+    return true;
   });
-  // 日常任务（今日）
-  NK.ensureDailyTasks();
-  // 演示KPI事件
-  NK.addKpiEvent({ date: today, engineer: '沈煜钦', itemId: 'praise', itemName: '表扬', type: 'manual', points: 5, reason: '湖州专网自查配合积极，客户点名表扬', source: '演示数据' });
-  NK.addKpiEvent({ date: today, engineer: '黄明楚', itemId: 'attendance', itemName: '考勤规范', type: 'manual', points: -2, reason: '7月某日迟到10分钟', source: '演示数据' });
-  NK.addKpiEvent({ date: today, engineer: '孙晓', itemId: 'knowledge_sharing', itemName: '知识分享', type: 'manual', points: 1, reason: '分享打印机驱动排查技巧', source: '演示数据' });
+  NK.db.projectTasks = (NK.db.projectTasks || []).filter(pt => !demoProjectIds.has(pt.projectId));
+
+  /* 4) 清理旧模板生成的日常任务：
+         - 模板不在白名单（旧 TPL007/008/009/010/012/013 等）
+         - 或 source === '日常模板'（旧日常任务体系）
+         - 或引用已删除的演示派单/专项 */
+  NK.db.tasks = (NK.db.tasks || []).filter(t => {
+    if (t.source === '日常模板') return false;
+    if (t.source === '系统固定任务' && t.templateId && !whitelistIds.includes(t.templateId)) return false;
+    if (oldTemplateIds.some(ot => ot.id === t.templateId) && !whitelistIds.includes(t.templateId)) return false;
+    if (t.dispatchId && demoDispatchIds.has(t.dispatchId)) return false;
+    if (t.projectId && demoProjectIds.has(t.projectId)) return false;
+    return true;
+  });
+
+  /* 5) 清理 source='演示数据' 的 KPI 事件（保留花姐人工登记/系统自动事件） */
+  NK.db.kpiEvents = (NK.db.kpiEvents || []).filter(ev => ev.source !== '演示数据');
+
+  /* 6) 已完成的旧固定任务（白名单模板）标记为历史归档，不再出现在今日工作流 */
+  NK.db.tasks.forEach(t => {
+    if (t.source === '系统固定任务' && t.templateId && whitelistIds.includes(t.templateId)) {
+      // 为白名单任务补齐 fixedDate / fixedYM 字段以便按日/月去重
+      if (!t.fixedDate && !t.fixedYM) {
+        const tpl = NK.FIXED_TASKS.find(x => x.id === t.templateId);
+        if (tpl && ['每日', '每日14:30', '每日下班前'].includes(tpl.frequency)) t.fixedDate = t.createdAt.slice(0, 10);
+        if (tpl && ['每月', '月报完成后'].includes(tpl.frequency)) t.fixedYM = t.createdAt.slice(0, 7);
+      }
+    }
+  });
+
+  NK.db.fixedMigrated = true;
+  NK.save();
 };

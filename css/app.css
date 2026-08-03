@@ -947,6 +947,17 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .tl-src-task    { background: #f0f1f3; color: var(--text-2); } /* 普通任务：中性浅灰 */
 /* 已完成任务：来源标签降透明度（不加删除线） */
 .tl-src-done { opacity: .45; }
+
+/* 派单任务上门日期（辅助信息，视觉权重低于任务名称）·
+   普通括号、浅灰、12px、不换行、不与 P1/P2 争抢视觉 */
+.timeline-onsite-date {
+  display: inline-flex; align-items: center;
+  margin-left: 5px;
+  color: #7a8091; font-size: 12px; font-weight: 400;
+  white-space: nowrap; vertical-align: middle;
+}
+/* 已完成派单任务：上门日期随整条一起降透明度（不加删除线） */
+.tl-item.tl-done .timeline-onsite-date { opacity: .55; }
 /* P1/P2 优先级标签与来源标签、任务名保持间距（P3 已隐藏） */
 .tl-pri { display: inline-flex; align-items: center; margin-left: 7px; vertical-align: middle; }
 

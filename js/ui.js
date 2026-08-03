@@ -435,6 +435,53 @@ UI.tlSourceBadge = (t) => {
 };
 
 /* ============================================================
+   今日时间轴 · 上门日期（仅派单关联任务）
+   - 返回「（上门：X月X日）」，跨年带完整年份；无日期→「（上门待确认）」
+   - 数据来源：关联派单记录的真实上门日期字段 visitDate（YYYY-MM-DD）
+   - 安全解析，避免 YYYY-MM-DD 因 UTC 时区偏移一天
+   - 非派单任务（日常/专项/普通）返回空字符串，不显示
+   - done 时并入整条弱化（由外层 tl-done 统一降低透明度，不单独加删除线）
+   ============================================================ */
+UI.tlOnsiteDate = (t) => {
+  if (!t) return '';
+  // 仅对派单关联任务显示；派单条目本身（dispsOnDay 收录）不加括号
+  if (t.kind === 'dispatch' || t.type === 'dispatch') return '';
+  let isDispatch = !!(t.dispatchId || (t.sourceType === 'dispatch' && t.sourceId) || t.dispatchOfTask);
+  // 时间轴 task/tpl 条目可能只带 taskId，需反查原始任务再判派单
+  let raw = null;
+  if (!isDispatch && (t.kind === 'task' || t.kind === 'tpl') && t.taskId) {
+    raw = NK.getTask(t.taskId);
+    if (raw && NK.dispatchOfTask(raw)) isDispatch = true;
+  }
+  if (!isDispatch) return '';
+  // 取关联派单记录
+  const d = t.dispatchOfTask ? t.dispatchOfTask : NK.dispatchOfTask(raw || t);
+  if (!d) return '';
+  const v = d.visitDate || d.planArrive || '';
+  return `<span class="timeline-onsite-date">（${UI.fmtOnsite(v)}）</span>`;
+};
+
+/** 格式化上门日期：YYYY-MM-DD 安全解析避免 UTC 偏移；无值→「上门待确认」；跨年带完整年份 */
+UI.fmtOnsite = (dateValue, now) => {
+  now = now || new Date();
+  if (!dateValue) return '上门待确认';
+  let year, month, day;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) {
+    const parts = dateValue.split('-').map(Number);
+    [year, month, day] = parts;
+  } else {
+    const date = new Date(dateValue);
+    if (Number.isNaN(date.getTime())) return '上门待确认';
+    year = date.getFullYear();
+    month = date.getMonth() + 1;
+    day = date.getDate();
+  }
+  return year === now.getFullYear()
+    ? `上门：${month}月${day}日`
+    : `上门：${year}年${month}月${day}日`;
+};
+
+/* ============================================================
    今日指挥台 v2 — 四区域结构
    ============================================================ */
 UI.renderHome = () => {
@@ -586,12 +633,15 @@ UI.renderHome = () => {
           ? `<button class="btn btn-sm ${t.done ? 'btn-ghost' : 'btn-accent'}" style="margin-left:8px;vertical-align:middle" onclick="event.stopPropagation();UI.toggleConsumableDone('${t.taskId}',${t.done})">${t.done ? '↩ 撤销' : '✓ 标记完成'}</button>`
           : '';
         const srcBadge = UI.tlSourceBadge(t);
+        // 派单任务在名称后补充上门日期（读取关联派单 visitDate），非派单任务为空
+        const onsiteDate = UI.tlOnsiteDate(t);
         // P3 为普通优先级，时间轴中不显示其标签；无优先级也不显示
         const priBadge = (t.pri && t.pri !== 'P3') ? `<span class="tl-pri">${UI.priBadge(t.pri)}</span>` : '';
         return `<div ${clickAttr}>
           <span class="tl-time">${t.time}</span>
           ${srcBadge ? `<span class="tl-src-wrap">${srcBadge}</span>` : ''}
           <span class="tl-name">${t.done ? '✓ ' : ''}${NK.esc(t.name)}</span>
+          ${onsiteDate}
           ${priBadge}
           ${t.sub ? `<div class="tl-note">${t.sub}</div>` : ''}
           ${cmplBtn}

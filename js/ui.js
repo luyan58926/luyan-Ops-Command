@@ -439,13 +439,17 @@ UI.tlSourceBadge = (t) => {
   // 派单条目（dispsOnDay 收录，名称已含"派单"字样）不再重复加来源标签
   if (t.kind === 'dispatch' || t.type === 'dispatch') return '';
   let label = '', cls = 'tl-src';
-  // 是否为派单关联任务：条目自带 dispatchId/sourceType，或通过 taskId 反查原始任务
+  // 任务型条目：通过 taskId 反查原始任务，用于判断派单关联 / 任务类型
+  let rawType = t.type;
   let isDispatch = !!(t.dispatchId || (t.sourceType === 'dispatch' && t.sourceId) || t.dispatchOfTask);
-  if (!isDispatch && t.kind === 'task' && t.taskId) {
+  if (t.kind === 'task' && t.taskId) {
     const raw = NK.getTask(t.taskId);
-    if (raw && NK.dispatchOfTask(raw)) isDispatch = true;
+    if (raw) {
+      if (raw.type) rawType = raw.type;
+      if (NK.dispatchOfTask(raw)) isDispatch = true;
+    }
   }
-  if (t.kind === 'project' || t.type === 'project') { label = '专项'; cls += ' tl-src-project'; }
+  if (t.kind === 'project' || t.type === 'project' || rawType === '专项任务') { label = '专项'; cls += ' tl-src-project'; }
   else if (isDispatch) { label = '派单'; cls += ' tl-src-dispatch'; }
   else if (t.kind === 'tpl' || t.source === '系统固定任务' || t.templateId) { label = '日常'; cls += ' tl-src-daily'; }
   else { label = '任务'; cls += ' tl-src-task'; }
@@ -528,14 +532,14 @@ UI.renderHome = () => {
   // ── 区域3：横向轻量快捷入口条 ──────────────────────────────
   const quickCards = [
     { icon: '📋', label: '新建派单', sub: '30秒搞定', primary: true, act: 'UI.dispatchCreate()' },
-    { icon: '📝', label: '快速记录', sub: '先记下来，别让它溜走', act: 'UI.quickNote()' },
-    { icon: '🗓️', label: '登记休假', sub: '记休假，补位不遗漏', lavender: true, act: 'UI.leaveCreate()' },
-    { icon: '🔄', label: '更新进度', sub: '补一句反馈', act: 'UI.taskCreate(true)' },
+    { icon: '📌', label: '新增任务', sub: '客户事项，及时登记', second: true, act: 'UI.taskQuickCreate()' },
+    { icon: '📝', label: '快速记录', sub: '会议、备忘随手记', act: 'UI.quickNote()' },
+    { icon: '🗓️', label: '登记休假', sub: '记休假，补位不遗漏', act: 'UI.leaveCreate()' },
     { icon: '📊', label: '登记KPI', sub: '加分扣分都留痕', act: 'UI.kpiEventCreate()' },
     { icon: '📄', label: '生成交接', sub: '一键整理今日', act: 'UI.handoverToday()' },
   ];
   const quickCardsHTML = quickCards.map(q => 
-    `<a class="quick-card ${q.primary ? 'qc-primary' : ''}${q.lavender ? ' qc-lavender' : ''}" href="javascript:void(0)" onclick="${q.act}">
+    `<a class="quick-card ${q.primary ? 'qc-primary' : ''}${q.second ? ' qc-second' : ''}" href="javascript:void(0)" onclick="${q.act}">
       <span class="qc-icon">${q.icon}</span>
       <div class="qc-text">
         <div class="qc-label">${q.label}</div>
@@ -2485,6 +2489,52 @@ UI.taskCreate = (updateMode) => {
           engineer: root.querySelector('#tcEng').value, dueDate: root.querySelector('#tcDue').value,
           nextAction: root.querySelector('#tcNext').value,
           source: '花姐手动新增',
+        });
+        if (t.engineer) NK.addReminder(`任务待处理：${t.name}`, `${t.no} · ${t.engineer}`, 'task', t.id);
+        NK.save();
+        UI.toast(`任务 ${t.no} 已创建，记下来啦 ✓`);
+        UI.modalClose();
+        UI.renderTasks();
+      };
+    },
+  });
+};
+
+/* ============================================================
+   轻量新增任务（首页快捷入口：新增任务）
+   - 复用 NK.createTask 数据模型，与"任务与告警"列表、今日时间轴联动
+   - 字段：任务名称(必填)、任务类型(专项任务默认/普通任务)、截止日期(浏览器本地)、
+           负责工程师(可选，复用9位)、备注(可选)
+   - 仅创建任务，不自动生成派单/消息/KPI
+   ============================================================ */
+UI.taskQuickCreate = () => {
+  const engOpts = NK.db.engineers.map(e => `<option value="${NK.esc(e.name)}">${NK.esc(NK.v.engName(e.name))}${e.onsiteRegions.length ? '（驻场：' + NK.esc(e.onsiteRegions.join('/')) + '）' : ''}</option>`).join('');
+  UI.modal('新增任务', `
+    <div class="form-item"><label>任务名称 *</label><input id="tqcName" placeholder="客户事项，及时登记"></div>
+    <div class="form-item"><label>任务类型</label>
+      <select id="tqcType">
+        <option value="专项任务">专项任务</option>
+        <option value="普通任务">普通任务</option>
+      </select>
+    </div>
+    <div class="form-item"><label>截止日期</label><input id="tqcDue" type="date" value="${NK.today()}"></div>
+    <div class="form-item"><label>负责工程师（可选）</label><select id="tqcEng"><option value="">未指派</option>${engOpts}</select></div>
+    <div class="form-item"><label>备注（可选）</label><textarea id="tqcNote" placeholder="任务要求、下一步等，可留空"></textarea></div>`,
+    `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="tqcOk">创建任务</button>`, {
+    editable: true,
+    onMount(root) {
+      root.querySelector('#tqcOk').onclick = () => {
+        const name = root.querySelector('#tqcName').value.trim();
+        if (!name) { UI.toast('请填写任务名称', 'warn'); return; }
+        const type = root.querySelector('#tqcType').value;
+        const t = NK.createTask({
+          name,
+          type,
+          priority: 'P3',
+          source: '花姐手动新增',
+          dueDate: root.querySelector('#tqcDue').value,
+          engineer: root.querySelector('#tqcEng').value,
+          nextAction: root.querySelector('#tqcNote').value.trim(),
         });
         if (t.engineer) NK.addReminder(`任务待处理：${t.name}`, `${t.no} · ${t.engineer}`, 'task', t.id);
         NK.save();

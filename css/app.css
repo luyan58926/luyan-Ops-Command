@@ -878,18 +878,18 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   box-shadow: 0 4px 14px rgba(124, 106, 170, .4);
   border-color: transparent; color: #fff;
 }
-/* 登记休假：极浅薰衣草色细节点缀，与主卡/白卡保持同尺寸层级 */
-.quick-card.qc-lavender {
-  background: linear-gradient(135deg, #faf8ff 0%, #f2edfb 100%);
-  border-color: #e6def6;
+/* 新增任务：浅紫色次级卡，与主卡/白卡保持同尺寸层级 */
+.quick-card.qc-second {
+  background: linear-gradient(135deg, #f6f3ff 0%, #ece6fb 100%);
+  border-color: #e3dbff;
 }
-.quick-card.qc-lavender:hover {
+.quick-card.qc-second:hover {
   border-color: var(--accent); color: var(--accent);
 }
 .qc-icon { font-size: 16px; flex-shrink: 0; line-height: 1; }
 .qc-text { flex: 1; min-width: 0; }
-.qc-label { font-weight: 600; font-size: 12.5px; }
-.qc-sub { font-size: 10.5px; opacity: .7; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qc-label { font-weight: 600; font-size: 15px; }
+.qc-sub { font-size: 12px; color: var(--text-3); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* 更多按钮保持原样 */
 .qa-more { position: relative; }

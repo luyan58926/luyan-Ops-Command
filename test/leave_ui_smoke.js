@@ -162,8 +162,8 @@ ok(qcCount === 6, '快捷卡数量为6（实际 ' + qcCount + '）');
 ok(quickHTML.includes('登记休假') && quickHTML.includes('记休假，补位不遗漏'), '含"登记休假"卡及副文案');
 ok(!quickHTML.includes('查资源'), '首页不再显示"查资源"卡');
 ok(!quickHTML.includes('收到耗材提醒'), '首页不再显示"收到耗材提醒"卡');
-ok(quickHTML.includes('新建派单') && quickHTML.includes('快速记录') && quickHTML.includes('更新进度') && quickHTML.includes('登记KPI') && quickHTML.includes('生成交接'), '其余5张卡保留');
-ok(quickHTML.includes('qc-lavender'), '登记休假卡使用薰衣草点缀样式');
+ok(quickHTML.includes('新建派单') && quickHTML.includes('新增任务') && quickHTML.includes('快速记录') && quickHTML.includes('登记KPI') && quickHTML.includes('生成交接'), '其余5张卡保留');
+ok(quickHTML.includes('qc-second') && !quickHTML.includes('qc-lavender'), '新增任务卡使用浅紫次级样式，登记休假已回归中性白卡');
 ok(quickHTML.includes('qc-primary'), '新建派单保持主卡样式');
 
 console.log('== 需求变更：任务与告警已移除耗材提醒录入入口 ==');

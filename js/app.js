@@ -164,7 +164,7 @@ NK.initDB = () => {
     // 运行时数据
     tasks: [], dispatches: [], projects: [], projectTasks: [],
     taskUpdates: [], kpiEvents: [], customerRatings: [], reminders: [], handovers: [],
-    quickNotes: [],
+    quickNotes: [], leaves: [],
     nextSeq: { dispatch: 1, task: 1, project: 1, kpi: 1 },
     createdAt: NK.now(),
     // 实时告警清空状态（一键清空）：只标记告警提示，绝不删除业务数据
@@ -200,6 +200,187 @@ NK.getDispatch = (id) => NK.db.dispatches.find(d => d.id === id);
 NK.getTask = (id) => NK.db.tasks.find(t => t.id === id);
 NK.getProject = (id) => NK.db.projects.find(p => p.id === id);
 NK.getProjectTasks = (pid) => NK.db.projectTasks.filter(t => t.projectId === pid);
+
+/* ============================================================
+   工程师休假记录（LeaveRecord）
+   只记录休假 + 是否需补位，不开发考勤/审批/申请。
+   ============================================================ */
+NK.LEAVE_PERIODS = ['全天', '上午', '下午'];
+NK.LEAVE_DISPATCH_STATUS = ['未判断', '无需派单', '待创建派单', '已创建派单', '已取消'];
+NK.LEAVE_RECORD_STATUS = ['有效', '已取消', '已归档'];
+NK.getLeave = (id) => NK.db.leaves.find(l => l.leaveId === id);
+NK.leavesByEngineer = (name) => NK.db.leaves.filter(l => l.engineerName === name && l.recordStatus !== '已归档');
+
+/**
+ * 创建休假记录。data: {engineerId, startDate, endDate, leavePeriod, remark, dispatchRequired}
+ * 保留负责职场快照，避免日后区域变化导致历史记录失真。
+ */
+NK.createLeave = (data) => {
+  const eng = NK.db.engineers.find(e => e.id === data.engineerId) || NK.getEngineer(data.engineerName);
+  if (!eng) return null;
+  const sites = NK.sitesByEngineer(eng.name);
+  const record = {
+    leaveId: NK.uid('L'),
+    engineerId: eng.id,
+    engineerName: eng.name,
+    startDate: data.startDate,
+    endDate: data.endDate || data.startDate,
+    leavePeriod: data.leavePeriod || '全天',
+    remark: data.remark || '',
+    dispatchRequired: data.dispatchRequired || '否',       // 是 / 否
+    dispatchStatus: data.dispatchStatus || (data.dispatchRequired === '是' ? '待创建派单' : '无需派单'),
+    relatedDispatchId: data.relatedDispatchId || '',
+    responsibleSitesSnapshot: sites.map(s => ({
+      siteId: s.id, siteName: s.name, city: s.city,
+      supportType: s.supportType || '远程', contactName: s.contactName || '',
+      defaultEngineer: s.defaultEngineer || '',
+    })),
+    createdAt: NK.now(),
+    updatedAt: NK.now(),
+    cancelledAt: '',
+    recordStatus: '有效',
+  };
+  NK.db.leaves.push(record);
+  NK.save();
+  return record;
+};
+
+/** 编辑休假（软更新，保留快照与关联派单） */
+NK.updateLeave = (id, patch) => {
+  const l = NK.getLeave(id);
+  if (!l || l.recordStatus !== '有效') return null;
+  if (patch.startDate) l.startDate = patch.startDate;
+  if (patch.endDate) l.endDate = patch.endDate;
+  if (patch.leavePeriod) l.leavePeriod = patch.leavePeriod;
+  if (patch.remark !== undefined) l.remark = patch.remark;
+  // 若快照缺失或工程师负责职场变化，补快照
+  if (!l.responsibleSitesSnapshot || !l.responsibleSitesSnapshot.length) {
+    const sites = NK.sitesByEngineer(l.engineerName);
+    l.responsibleSitesSnapshot = sites.map(s => ({
+      siteId: s.id, siteName: s.name, city: s.city,
+      supportType: s.supportType || '远程', contactName: s.contactName || '',
+      defaultEngineer: s.defaultEngineer || '',
+    }));
+  }
+  l.updatedAt = NK.now();
+  NK.save();
+  return l;
+};
+
+/** 取消休假（软删除，不删历史、不自动删关联派单） */
+NK.cancelLeave = (id) => {
+  const l = NK.getLeave(id);
+  if (!l) return null;
+  l.recordStatus = '已取消';
+  l.cancelledAt = NK.now();
+  l.updatedAt = NK.now();
+  NK.save();
+  return l;
+};
+
+/** 休假补位派单创建成功后，将派单关联到休假记录 */
+NK.linkLeaveDispatch = (leaveId, dispatchId) => {
+  const l = NK.getLeave(leaveId);
+  if (!l) return null;
+  const d = NK.getDispatch(dispatchId);
+  l.relatedDispatchId = dispatchId;
+  l.dispatchStatus = d ? '已创建派单' : '待创建派单';
+  if (d) l.relatedDispatchNo = d.no;
+  l.updatedAt = NK.now();
+  NK.save();
+  return l;
+};
+
+/** 计算某条休假记录覆盖的自然日集合（YYYY-MM-DD 数组） */
+NK.leaveDates = (l) => {
+  const out = [];
+  const d = new Date(l.startDate + 'T00:00:00');
+  const end = new Date(l.endDate + 'T00:00:00');
+  if (isNaN(d) || isNaN(end)) return out;
+  while (d <= end) {
+    out.push(NK.fmtDate(d));
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+};
+
+/** 某天（YYYY-MM-DD）正在休假的有效记录。
+ *  半天休假（上午/下午）：该天也算在休（首页按"该工程师当天在休"处理）。 */
+NK.leavesOnDate = (dateStr) =>
+  NK.db.leaves.filter(l =>
+    l.recordStatus === '有效' &&
+    l.startDate <= dateStr && dateStr <= l.endDate);
+
+/** 今天 / 明天休假的记录 */
+NK.leavesToday = () => NK.leavesOnDate(NK.today());
+NK.leavesTomorrow = () => NK.leavesOnDate(NK.fmtDate(new Date(Date.now() + 86400000)));
+
+/**
+ * 休假建议（只给建议，不替花姐决定）。
+ * 返回 string[] 建议列表。
+ */
+NK.leaveSuggestions = (eng, startDate, endDate, period) => {
+  const tips = [];
+  if (!eng) return tips;
+  const days = NK.daysBetween(startDate, endDate) + 1;
+  const isOnsite = (eng.onsiteRegions || []).length > 0;
+  // 驻场工程师缺口
+  if (isOnsite) {
+    tips.push('该工程师休假期间可能出现现场支持缺口，请确认是否需要派单。');
+  }
+  // 连续休假阈值（可在系统设置修改）
+  const threshold = NK.db.leaveRules && NK.db.leaveRules.continuousDays ? NK.db.leaveRules.continuousDays : 2;
+  if (days >= threshold) {
+    tips.push(`本次连续休假 ${days} 天，建议确认补位安排。`);
+  }
+  // 半天休假
+  if (period === '上午' || period === '下午') {
+    tips.push('本次为半天休假，预计影响相对较小，请根据现场安排判断。');
+  }
+  // 同一职场已有其他覆盖工程师
+  const sites = NK.sitesByEngineer(eng.name);
+  if (sites.length) {
+    const covered = sites.some(s => s.defaultEngineer && s.defaultEngineer !== eng.name);
+    if (covered) tips.push('该职场已有其他工程师覆盖，可能无需额外派单。');
+  }
+  // 多人休假重叠
+  const overlap = NK.db.leaves.filter(l =>
+    l.recordStatus === '有效' && l.engineerName !== eng.name &&
+    l.startDate <= endDate && l.endDate >= startDate);
+  if (overlap.length >= 1) {
+    tips.push(`该时间段已有 ${overlap.length + 1} 名工程师休假，请留意区域支持能力。`);
+  }
+  return tips;
+};
+
+/**
+ * 某工程师某月因休假应排除的"工作日"天数（用于 KPI 工单量扣分排除）。
+ * 只统计"全天"休假的天；半天休假不纳入工单量排除（影响较小）。
+ * 返回数字（排除后该月标准工作量天数相应减少）。
+ */
+NK.leaveWorkdaysExcluded = (engineerName, month) => {
+  const leaves = NK.db.leaves.filter(l =>
+    l.recordStatus === '有效' && l.engineerName === engineerName &&
+    l.leavePeriod === '全天' && l.startDate.slice(0, 7) <= month && l.endDate.slice(0, 7) >= month);
+  let days = 0;
+  leaves.forEach(l => {
+    NK.leaveDates(l).forEach(d => {
+      if (d.slice(0, 7) === month) {
+        const dow = new Date(d + 'T00:00:00').getDay();
+        if (dow !== 0 && dow !== 6) days++;   // 只扣工作日
+      }
+    });
+  });
+  return days;
+};
+
+/** 工程师是否有进行中的补位派单（关联且未闭环） */
+NK.engineerHasActiveCoverDispatch = (engineerName) =>
+  NK.db.leaves.some(l =>
+    l.recordStatus === '有效' && l.engineerName === engineerName &&
+    l.relatedDispatchId &&
+    ['已创建派单'].includes(l.dispatchStatus) &&
+    (() => { const d = NK.getDispatch(l.relatedDispatchId); return d && !['已闭环', '已取消'].includes(d.status); })());
 
 /** 按城市查找职场（同城多职场必须列出全部） */
 NK.sitesByCity = (city) => NK.db.sites.filter(s => s.city.includes(city) || city.includes(s.city));
@@ -702,11 +883,14 @@ NK.autoKpi = (engineerName, month) => {
       out.deductTotal += pts;
     }
   });
-  // 工单量
+  // 工单量（休假全天工作日排除：休假日不计入标准工单量要求，不因此扣分）
   const quota = rules.dailyQuota || 15;
   const workdays = 22;
-  if (out.taskCount < quota * workdays) {
-    const miss = quota * workdays - out.taskCount;
+  const leaveExcluded = NK.leaveWorkdaysExcluded ? NK.leaveWorkdaysExcluded(engineerName, month) : 0;
+  const effectiveWorkdays = Math.max(0, workdays - leaveExcluded);
+  const required = Math.round(quota * effectiveWorkdays);
+  if (out.taskCount < required) {
+    const miss = required - out.taskCount;
     const pts = -Math.min(miss, 10); // max 10
     if (pts < 0) out.deductTotal += pts;
   }
@@ -1324,6 +1508,7 @@ NK.assistantReply = (q) => {
 NK.migrateFixedTasks = () => {
   const whitelistIds = NK.FIXED_TASKS.map(t => t.id);   // 9 项白名单
   const oldTemplateIds = NK.db.handoverTemplates || [];
+  NK.db.leaves = NK.db.leaves || [];   // 休假记录（旧存档初始化，幂等）
 
   /* 1) 固定任务模板升级为 9 项白名单 */
   NK.db.handoverTemplates = NK.FIXED_TASKS.slice();

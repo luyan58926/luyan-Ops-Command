@@ -299,6 +299,7 @@ UI.renderHome = () => {
       ${overdue > 0 ? `<span class="ds-pill ds-danger" onclick="UI.nav('tasks')"><span class="ds-dot"></span>已超时 <strong>${overdue}</strong></span>` : ''}
       ${!p1 && !waitSend && !waitAccept && !overdue ? '<span class="ds-all-ok">✓ 当前无紧急事项，运维节奏良好 ✨</span>' : ''}
     </div>
+    ${UI.leaveRemindHTML()}
     <div class="dash-zone dash-quick">
       <div class="quick-toolbar">
         ${quickCardsHTML}
@@ -309,6 +310,99 @@ UI.renderHome = () => {
       ${tlHTML}
     </div>
   `;
+};
+
+/* ============================================================
+   首页 · 今日休假提醒（紧凑区块）
+   只做状态展示与提醒，不进入今日时间轴；补位派单走派单任务规则。
+   ============================================================ */
+UI.leaveRemindHTML = () => {
+  const today = NK.today();
+  const todayLeaves = NK.leavesToday();          // 今天正在休假（含半天）
+  const tomorrowLeaves = NK.leavesTomorrow();     // 明天开始休假
+  const total = NK.db.engineers.length;
+
+  // 明天休假但补位未安排（待创建派单）→ 提前一天提醒
+  const tomorrowNeed = tomorrowLeaves.filter(l => l.dispatchStatus === '待创建派单');
+
+  // 今日休假：展示姓名 / 时段 / 补位状态
+  const parts = todayLeaves.map(l => {
+    const name = NK.v.engName(l.engineerName);
+    const per = l.leavePeriod === '全天' ? '全天' : l.leavePeriod;
+    let tag = '';
+    if (l.dispatchStatus === '已创建派单') tag = '<span class="lr-tag lr-ok">已安排补位</span>';
+    else if (l.dispatchStatus === '无需派单') tag = '<span class="lr-tag lr-mute">无需派单</span>';
+    else if (l.dispatchStatus === '待创建派单') tag = '<span class="lr-tag lr-warn">待安排补位</span>';
+    else tag = '<span class="lr-tag lr-mute">未判断</span>';
+    return `${name}<span class="lr-period">（${per}）</span>${tag}`;
+  });
+
+  // 有今天休假但补位未安排 → 加强提示（不标记严重告警）
+  const todayNeed = todayLeaves.filter(l => l.dispatchStatus === '待创建派单');
+
+  let body = '';
+  let cls = 'lr-row lr-none';
+
+  if (parts.length) {
+    const todayPart = parts.map(p => `<span class="lr-person">${p}</span>`).join('');
+    // 明天未安排补位 → 额外追加"去创建派单"按钮
+    const tomorrowBtn = tomorrowNeed.length
+      ? `<button class="lr-btn" onclick="UI.leaveCreateDispatch('${tomorrowNeed[0].leaveId}')">去创建派单 →</button>`
+      : '';
+    body = `<span class="lr-emoji">🌴</span><span class="lr-title">今日休假 ${todayLeaves.length}人</span> ${todayPart}${tomorrowBtn}`;
+    cls = todayNeed.length ? 'lr-row lr-need' : 'lr-row';
+  } else if (tomorrowNeed.length) {
+    // 今天没人休，但明天有人休且未安排补位 → 提前提醒
+    const name = NK.v.engName(tomorrowNeed[0].engineerName);
+    const per = tomorrowNeed[0].leavePeriod === '全天' ? '全天' : tomorrowNeed[0].leavePeriod;
+    body = `<span class="lr-emoji">⏰</span><span class="lr-title">明天 ${name} 休假（${per}）补位未安排</span>
+      <button class="lr-btn" onclick="UI.leaveCreateDispatch('${tomorrowNeed[0].leaveId}')">去创建派单 →</button>`;
+    cls = 'lr-row lr-need';
+  } else {
+    // 无人休假（或都无需/已安排）→ 降低视觉权重
+    body = `<span class="lr-emoji">🙂</span><span class="lr-title">今日 ${total}名工程师均在岗</span>`;
+    cls = 'lr-row lr-none';
+  }
+
+  const clickTarget = (todayLeaves.length || tomorrowNeed.length)
+    ? ' onclick="UI.leaveTodayDetail()"'
+    : '';
+  return `<div class="dash-zone dash-leave"><div class="${cls}"${clickTarget}>${body}</div></div>`;
+};
+
+/** 今日休假详情抽屉（点击首页休假提醒整行打开） */
+UI.leaveTodayDetail = () => {
+  const today = NK.today();
+  const leaves = NK.leavesToday();
+  const tomorrowNeed = NK.leavesTomorrow().filter(l => l.dispatchStatus === '待创建派单');
+  const rows = [...leaves, ...tomorrowNeed.filter(l => !leaves.includes(l))].map(l => {
+    const days = NK.daysBetween(l.startDate, l.endDate) + 1;
+    const sites = (l.responsibleSitesSnapshot || []).map(s => NK.v.siteName(s.siteName)).join('、') || '—';
+    let stBadge = UI.leaveStatusBadge(l.dispatchStatus);
+    if (l.dispatchStatus === '待创建派单') {
+      stBadge += ` <button class="btn btn-sm btn-accent" onclick="UI.leaveCreateDispatch('${l.leaveId}')">去创建派单</button>`;
+    }
+    if (l.relatedDispatchId) {
+      const d = NK.getDispatch(l.relatedDispatchId);
+      if (d) stBadge += ` <button class="btn btn-sm" onclick="UI.dispatchDetail('${d.id}')">查看派单 ${NK.esc(d.no)}</button>`;
+    }
+    return `<div class="lr-d-item">
+      <div class="lr-d-line"><b>${NK.esc(NK.v.engName(l.engineerName))}</b>
+        <span class="badge gray">${l.leavePeriod}</span>
+        <span class="num">${l.startDate} ~ ${l.endDate}（${days}天）</span></div>
+      <div class="lr-d-sub">负责职场：${NK.esc(sites)}${l.remark ? '　备注：' + NK.esc(l.remark) : ''}</div>
+      <div style="margin-top:6px">${stBadge}</div>
+    </div>`;
+  }).join('');
+
+  const body = rows
+    ? `<div class="lr-d-list">${rows}</div>
+       <div style="margin-top:10px;font-size:11px;color:var(--text-3)">点击"去创建派单"为现场支持缺口安排补位；已安排补位的不再催促。</div>`
+    : '<div class="fc-empty"><div class="fc-empty-icon">🙂</div><div class="fc-empty-text">今日无休假安排，工程师均在岗</div></div>';
+
+  UI.modal('今日休假详情', body, `<button class="btn" data-close>关闭</button>`, {
+    onMount(root) { root.querySelector('[data-close]').onclick = () => UI.modalClose(); },
+  });
 };
 
 UI.resourcesJump = () => {
@@ -398,7 +492,8 @@ UI.renderDispatch = (filterArg) => {
    极简化派单创建
    ============================================================ */
 
-UI.dispatchCreate = (siteId) => {
+UI.dispatchCreate = (siteId, prefillOpts) => {
+  prefillOpts = prefillOpts || {};
   const LS_KEY = 'nk_recent_sites';
   const getRecent = () => { try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch { return []; } };
   const addRecent = (site) => {
@@ -481,6 +576,9 @@ UI.dispatchCreate = (siteId) => {
         addRecent(s);
         searchInput.value = NK.v.siteName(s.name);
 
+        // 补位派单：若默认工程师正在休假，提示花姐改用其他工程师
+        const isExcluded = prefillOpts.excludeEngineer && s.defaultEngineer === prefillOpts.excludeEngineer;
+
         if (!s.needDispatch) {
           errorEl.textContent = `「${NK.v.siteName(s.name)}」为驻场区域，默认由驻场直接处理，无需常规派单。`;
           errorEl.classList.remove('hidden');
@@ -489,10 +587,13 @@ UI.dispatchCreate = (siteId) => {
         } else {
           errorEl.classList.add('hidden');
           candidates.classList.add('hidden');
+          const engLabel = isExcluded
+            ? `<span class="dps-eng" style="color:var(--warn)">默认工程师 ${NK.esc(NK.v.engName(s.defaultEngineer || '—'))} 休假中，请在派单后另行指定执行工程师</span>`
+            : `<span class="dps-eng">默认工程师：${NK.esc(NK.v.engName(s.defaultEngineer || '—'))}</span>`;
           selected.innerHTML = `<span class="dps-badge">已选择</span>
             <span class="dps-name">${NK.esc(NK.v.siteName(s.name))}</span>
             <span class="dps-sep">·</span>
-            <span class="dps-eng">默认工程师：${NK.esc(NK.v.engName(s.defaultEngineer || '—'))}</span>
+            ${engLabel}
             <span class="dps-sep">·</span>
             <span class="dps-type">${s.supportType}</span>`;
           selected.classList.remove('hidden');
@@ -500,6 +601,11 @@ UI.dispatchCreate = (siteId) => {
 
         submitBtn.disabled = false;
         descInput.focus();
+        // 补位派单：预填派单原因（花姐可修改）
+        if (prefillOpts.prefillReason) {
+          descInput.value = prefillOpts.prefillReason;
+          checkSubmit && checkSubmit();
+        }
       };
 
       const doSearch = () => {
@@ -614,6 +720,11 @@ UI.dispatchCreate = (siteId) => {
           planArrive: arriveInput.value,
         });
 
+        // 补位派单：派单创建成功后关联休假记录，更新补位状态为"已创建派单"
+        if (prefillOpts.leaveId) {
+          NK.linkLeaveDispatch(prefillOpts.leaveId, d.id);
+        }
+
         // 内部派单协调：优先关联今日已存在的待处理派单协调任务，避免重复创建
         const _today = NK.today();
         const coordTask = NK.db.tasks.find(t =>
@@ -651,6 +762,16 @@ UI.dispatchCreate = (siteId) => {
       };
 
       root.querySelector('[data-close]').onclick = () => UI.modalClose();
+
+      // 补位派单：若传入了 siteId，自动选中该职场并预填
+      if (siteId) {
+        const preSite = NK.getSite(siteId);
+        if (preSite) {
+          pickSite(preSite);
+          setTimeout(() => descInput.focus(), 60);
+          return;
+        }
+      }
       setTimeout(() => searchInput.focus(), 60);
     },
   });
@@ -2278,66 +2399,86 @@ UI.resResetPwd = () => {
 UI.resSetupFromSettings = () => { UI.nav('resources'); };
 
 /* ============================================================
-   工程师与职场
+   工程师与职场（含：工程师 / 职场 / 休假记录 三页签）
    ============================================================ */
+UI.resTab = 'eng';   // eng | site | leave
+
 UI.renderResources = () => {
   if (!UI.resUnlocked()) { UI.resLockHTML(); return; }
   const el = document.getElementById('view-resources');
+  el.innerHTML = UI.pageHead('工程师与职场', `全国 ${NK.db.sites.length} 个职场 · ${NK.db.engineers.length} 名工程师 · 一次录入多处复用`,
+    `<button class="btn" onclick="UI.engAdd()">新增工程师</button><button class="btn btn-accent" onclick="UI.siteAdd()">新增职场</button>`) +
+    `<div class="res-tabs">
+      <button class="res-tab${UI.resTab === 'eng' ? ' active' : ''}" onclick="UI.resSetTab('eng')">工程师</button>
+      <button class="res-tab${UI.resTab === 'site' ? ' active' : ''}" onclick="UI.resSetTab('site')">职场</button>
+      <button class="res-tab${UI.resTab === 'leave' ? ' active' : ''}" onclick="UI.resSetTab('leave')">休假记录</button>
+    </div>
+    <div id="resTabBody"></div>`;
+  UI.resRenderTab();
+};
+
+UI.resSetTab = (t) => { UI.resTab = t; UI.renderResources(); };
+
+UI.resRenderTab = () => {
+  const body = document.getElementById('resTabBody');
+  if (!body) return;
+  if (UI.resTab === 'leave') { UI.renderLeaveRecords(body); return; }
   const q = (NK.resQ || '').trim().toLowerCase();
   const today = NK.today();
 
-  // 工程师卡片
-  const engCards = NK.db.engineers.map(e => {
-    const v = NK.v.eng(e);
-    const sites = NK.sitesByEngineer(e.name);
-    const active = NK.db.dispatches.filter(d => d.engineer === e.name && d.status !== '已闭环' && d.status !== '已取消').length;
-    const kpi = NK.computeKpi(e.name, NK.curMonth());
-    const onsite = e.onsiteRegions.filter(r => r).join(' / ') || '—';
-    const remote = e.remoteRegions.filter(r => r).join(' / ') || '—';
-    if (q && !`${e.name}${e.phone}${onsite}${remote}`.toLowerCase().includes(q)) return '';
-    return `<div class="eng-card" onclick="UI.engDetail('${e.id}')">
-      <div class="ec-head"><div class="ec-avatar">${NK.esc(v.name.slice(0, 1))}</div>
-        <div><div class="ec-name">${NK.esc(v.name)} <span class="badge gray">${NK.esc(v.phone)}</span></div>
-        <div class="ec-phone">驻场：${NK.esc(onsite)}</div>
-        <div class="ec-phone">远程：${NK.esc(remote)}</div></div></div>
-      <div class="ec-stats">
-        <div class="ec-stat"><div class="ec-stat-val">${sites.length}</div><div class="ec-stat-label">职场</div></div>
-        <div class="ec-stat"><div class="ec-stat-val">${active}</div><div class="ec-stat-label">进行中派单</div></div>
-        <div class="ec-stat"><div class="ec-stat-val" style="color:${kpi.final < 90 ? 'var(--warn)' : 'var(--accent)'}">${kpi.final}</div><div class="ec-stat-label">本月KPI</div></div>
-      </div>
-    </div>`;
-  }).filter(Boolean).join('');
-
-  // 职场表格
-  const sites = NK.db.sites.filter(s => {
-    if (!q) return true;
-    return `${s.id} ${s.name} ${s.city} ${s.province} ${s.address} ${s.contactName} ${s.contactPhone} ${s.defaultEngineer} ${s.remark}`.toLowerCase().includes(q);
-  });
-  const siteRows = sites.map(s => {
-    const v = NK.v.site(s);
-    const sup = NK.siteSupport(s);
-    const siteDisps = NK.db.dispatches.filter(d => d.siteId === s.id && d.status !== '已闭环');
-    return `<tr>
-      <td><div style="font-weight:600">${NK.esc(v.name)}</div><div class="num" style="font-size:11px">${s.id}</div></td>
-      <td>${NK.esc(s.province)} · ${NK.esc(s.city)}</td>
-      <td style="max-width:220px">${NK.esc(v.address)}</td>
-      <td>${NK.esc(v.contactName)}<div class="num">${NK.esc(v.contactPhone)}</div></td>
-      <td>${sup.type === '驻场' ? `<span class="badge accent">驻场</span>` : `<span class="badge gray">${NK.esc(s.supportType || '远程')}</span>`}${s.needDispatch ? '' : '<div style="font-size:10px;color:var(--text-3)">无需派单</div>'}</td>
-      <td>${NK.esc(v.defaultEngineer || '—')}</td>
-      <td>${UI.statusBadge(s.status || '正常')}</td>
-      <td style="white-space:nowrap">
-        <button class="btn btn-sm" onclick="UI.siteDetail('${s.id}')">详情</button>
-        ${s.needDispatch ? `<button class="btn btn-sm btn-accent" onclick="UI.dispatchCreate('${s.id}')">派单</button>` : ''}
-        ${siteDisps.length ? `<span class="num" style="font-size:11px">${siteDisps.length} 单进行中</span>` : ''}
-      </td>
-    </tr>`;
-  }).join('');
-
-  el.innerHTML = UI.pageHead('工程师与职场', `全国 ${NK.db.sites.length} 个职场 · ${NK.db.engineers.length} 名工程师 · 一次录入多处复用`,
-    `<button class="btn" onclick="UI.engAdd()">新增工程师</button><button class="btn btn-accent" onclick="UI.siteAdd()">新增职场</button>`) +
-    `<div class="card"><div class="card-head"><div class="card-title">工程师（${NK.db.engineers.length}）</div></div>
+  if (UI.resTab === 'eng') {
+    const engCards = NK.db.engineers.map(e => {
+      const v = NK.v.eng(e);
+      const sites = NK.sitesByEngineer(e.name);
+      const active = NK.db.dispatches.filter(d => d.engineer === e.name && d.status !== '已闭环' && d.status !== '已取消').length;
+      const kpi = NK.computeKpi(e.name, NK.curMonth());
+      const onsite = e.onsiteRegions.filter(r => r).join(' / ') || '—';
+      const remote = e.remoteRegions.filter(r => r).join(' / ') || '—';
+      if (q && !`${e.name}${e.phone}${onsite}${remote}`.toLowerCase().includes(q)) return '';
+      return `<div class="eng-card" onclick="UI.engDetail('${e.id}')">
+        <div class="ec-head"><div class="ec-avatar">${NK.esc(v.name.slice(0, 1))}</div>
+          <div><div class="ec-name">${NK.esc(v.name)} <span class="badge gray">${NK.esc(v.phone)}</span></div>
+          <div class="ec-phone">驻场：${NK.esc(onsite)}</div>
+          <div class="ec-phone">远程：${NK.esc(remote)}</div></div></div>
+        <div class="ec-stats">
+          <div class="ec-stat"><div class="ec-stat-val">${sites.length}</div><div class="ec-stat-label">职场</div></div>
+          <div class="ec-stat"><div class="ec-stat-val">${active}</div><div class="ec-stat-label">进行中派单</div></div>
+          <div class="ec-stat"><div class="ec-stat-val" style="color:${kpi.final < 90 ? 'var(--warn)' : 'var(--accent)'}">${kpi.final}</div><div class="ec-stat-label">本月KPI</div></div>
+        </div>
+      </div>`;
+    }).filter(Boolean).join('');
+    body.innerHTML = `<div class="card"><div class="card-head"><div class="card-title">工程师（${NK.db.engineers.length}）</div></div>
       <div class="card-body"><div class="eng-grid">${engCards || '<div class="tbl-empty" style="padding:20px">无匹配工程师</div>'}</div></div></div>
-    <div class="filter-bar">
+      <div class="filter-bar">
+        <input class="fb-input" id="resSearch" placeholder="搜索工程师 / 姓名 / 电话 / 区域…" value="${NK.esc(NK.resQ || '')}">
+        <span class="spacer"></span><span style="font-size:12px;color:var(--text-3)">工程师 ${engCards ? NK.db.engineers.length : 0} 名</span>
+      </div>`;
+  } else {
+    // 职场
+    const sites = NK.db.sites.filter(s => {
+      if (!q) return true;
+      return `${s.id} ${s.name} ${s.city} ${s.province} ${s.address} ${s.contactName} ${s.contactPhone} ${s.defaultEngineer} ${s.remark}`.toLowerCase().includes(q);
+    });
+    const siteRows = sites.map(s => {
+      const v = NK.v.site(s);
+      const sup = NK.siteSupport(s);
+      const siteDisps = NK.db.dispatches.filter(d => d.siteId === s.id && d.status !== '已闭环');
+      return `<tr>
+        <td><div style="font-weight:600">${NK.esc(v.name)}</div><div class="num" style="font-size:11px">${s.id}</div></td>
+        <td>${NK.esc(s.province)} · ${NK.esc(s.city)}</td>
+        <td style="max-width:220px">${NK.esc(v.address)}</td>
+        <td>${NK.esc(v.contactName)}<div class="num">${NK.esc(v.contactPhone)}</div></td>
+        <td>${sup.type === '驻场' ? `<span class="badge accent">驻场</span>` : `<span class="badge gray">${NK.esc(s.supportType || '远程')}</span>`}${s.needDispatch ? '' : '<div style="font-size:10px;color:var(--text-3)">无需派单</div>'}</td>
+        <td>${NK.esc(v.defaultEngineer || '—')}</td>
+        <td>${UI.statusBadge(s.status || '正常')}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm" onclick="UI.siteDetail('${s.id}')">详情</button>
+          ${s.needDispatch ? `<button class="btn btn-sm btn-accent" onclick="UI.dispatchCreate('${s.id}')">派单</button>` : ''}
+          ${siteDisps.length ? `<span class="num" style="font-size:11px">${siteDisps.length} 单进行中</span>` : ''}
+        </td>
+      </tr>`;
+    }).join('');
+    body.innerHTML = `<div class="filter-bar">
       <input class="fb-input" id="resSearch" placeholder="搜索职场 / 城市 / 工程师 / 联系人 / 电话…" value="${NK.esc(NK.resQ || '')}">
       <span class="spacer"></span><span style="font-size:12px;color:var(--text-3)">职场 ${sites.length} 个</span>
     </div>
@@ -2345,11 +2486,12 @@ UI.renderResources = () => {
       <thead><tr><th>职场</th><th>省市</th><th>地址</th><th>联系人</th><th>支持方式</th><th>默认工程师</th><th>状态</th><th>操作</th></tr></thead>
       <tbody>${siteRows || UI.empty('未找到匹配的职场', 8)}</tbody>
     </table></div></div>`;
+  }
 
   const inp = document.getElementById('resSearch');
   if (inp) inp.addEventListener('input', NK.debounce(() => {
     NK.resQ = inp.value;
-    UI.renderResources();
+    UI.resRenderTab();
     setTimeout(() => { const i = document.getElementById('resSearch'); if (i) i.focus(); }, 0);
   }, 250));
 };
@@ -2490,6 +2632,26 @@ UI.engDetail = (id) => {
   const disps = NK.db.dispatches.filter(d => d.engineer === e.name).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   const tasks = NK.db.tasks.filter(t => t.engineer === e.name && t.status !== '已完成');
   const kpi = NK.computeKpi(e.name, NK.curMonth());
+  // ── 休假情况（轻量）──
+  const engLeaves = NK.leavesByEngineer(e.name).sort((a, b) => b.startDate.localeCompare(a.startDate));
+  const today = NK.today();
+  const onLeaveNow = engLeaves.find(l => l.recordStatus === '有效' && l.startDate <= today && today <= l.endDate);
+  const nextLeave = engLeaves.find(l => l.recordStatus === '有效' && l.startDate > today);
+  const recentLeave = engLeaves.filter(l => l.recordStatus === '有效' && l.endDate < today)[0] || engLeaves.find(l => l.recordStatus === '有效');
+  const hasCover = NK.engineerHasActiveCoverDispatch(e.name);
+  const leaveHTML = `
+    <div class="card-head" style="margin-top:12px"><div class="card-title">休假情况</div>
+      <button class="btn btn-sm btn-accent" onclick="UI.leaveCreate('${e.id}')">＋ 登记休假</button></div>
+    <div class="card-body">
+      <div class="detail-grid">
+        <div class="dg-item"><div class="dg-label">当前状态</div><div class="dg-val">${onLeaveNow ? `<span style="color:var(--warn);font-weight:600">🌴 休假中（${NK.esc(onLeaveNow.leavePeriod)}）</span>` : '<span class="num" style="color:var(--text-2)">在岗</span>'}</div></div>
+        <div class="dg-item"><div class="dg-label">下一次休假</div><div class="dg-val">${nextLeave ? `${NK.esc(nextLeave.startDate)}${nextLeave.endDate !== nextLeave.startDate ? '~' + NK.esc(nextLeave.endDate) : ''}（${NK.esc(nextLeave.leavePeriod)}）` : '—'}</div></div>
+        <div class="dg-item"><div class="dg-label">补位派单</div><div class="dg-val">${hasCover ? '<span style="color:var(--accent);font-weight:600">有进行中补位派单</span>' : '—'}</div></div>
+        <div class="dg-item"><div class="dg-label">最近休假</div><div class="dg-val">${recentLeave ? `${NK.esc(recentLeave.startDate)}${recentLeave.endDate !== recentLeave.startDate ? '~' + NK.esc(recentLeave.endDate) : ''}` : '—'}</div></div>
+      </div>
+      ${engLeaves.length ? `<div class="num" style="font-size:11px;color:var(--text-3);margin-top:6px">共 ${engLeaves.length} 条休假记录，可在"休假记录"页签查看</div>` : ''}
+    </div>`;
+
   UI.modal(`工程师详情`, `
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
       <div class="ec-avatar" style="width:44px;height:44px;font-size:20px">${NK.esc(v.name.slice(0, 1))}</div>
@@ -2503,6 +2665,7 @@ UI.engDetail = (id) => {
       <div class="dg-item"><div class="dg-label">负责职场</div><div class="dg-val">${sites.length} 个</div></div>
       <div class="dg-item"><div class="dg-label">待办任务</div><div class="dg-val">${tasks.length} 个</div></div>
     </div>
+    ${leaveHTML}
     ${sites.length ? `<div class="card-head" style="margin-top:12px"><div class="card-title">负责职场（${sites.length}）</div></div>
       <div class="card-body flush" style="max-height:180px;overflow:auto">${sites.map(s => `
         <div class="focus-item"><span class="badge gray">${NK.esc(s.city)}</span>
@@ -2550,6 +2713,304 @@ UI.engAdd = () => {
     },
   });
 };
+
+/* ============================================================
+   休假记录（Leave）
+   ============================================================ */
+UI.leaveStatusBadge = (st) => {
+  const map = {
+    '无需派单': 'ok', '已创建派单': 'done', '待创建派单': 'warn', '未判断': 'gray', '已取消': 'gray',
+  };
+  return `<span class="badge ${map[st] || 'gray'}">${st}</span>`;
+};
+
+/** 休假记录列表 */
+UI.renderLeaveRecords = (body) => {
+  const f = NK.leaveFilter = NK.leaveFilter || { scope: 'all' };
+  const scope = f.scope || 'all';
+  const today = NK.today();
+  const month = today.slice(0, 7);
+  let list = [...NK.db.leaves].sort((a, b) => b.startDate.localeCompare(a.startDate) || b.createdAt.localeCompare(a.createdAt));
+  if (scope === '今天') list = list.filter(l => l.recordStatus === '有效' && NK.leavesOnDate(today).some(x => x.leaveId === l.leaveId));
+  else if (scope === '明天') list = list.filter(l => l.recordStatus === '有效' && NK.leavesTomorrow().some(x => x.leaveId === l.leaveId));
+  else if (scope === '本月') list = list.filter(l => l.startDate.slice(0, 7) === month || l.endDate.slice(0, 7) === month);
+
+  const scopes = ['全部', '今天', '明天', '本月'];
+  const rows = list.map(l => {
+    const vName = NK.v.engName(l.engineerName);
+    const sitesLabel = (l.responsibleSitesSnapshot || []).map(s => NK.v.siteName(s.siteName)).join('、') || '—';
+    const days = NK.daysBetween(l.startDate, l.endDate) + 1;
+    const linked = l.relatedDispatchId ? NK.getDispatch(l.relatedDispatchId) : null;
+    return `<tr>
+      <td><div style="font-weight:600">${NK.esc(vName)}</div>${l.recordStatus === '已取消' ? '<div style="font-size:10px;color:var(--text-3)">已取消</div>' : ''}</td>
+      <td>${NK.esc(l.startDate)}<div class="num" style="font-size:11px">${l.endDate !== l.startDate ? '至 ' + NK.esc(l.endDate) : ''}</div></td>
+      <td>${NK.esc(l.leavePeriod)}<div class="num" style="font-size:11px">${days} 天</div></td>
+      <td>${NK.esc(sitesLabel)}</td>
+      <td>${UI.leaveStatusBadge(l.dispatchStatus)}</td>
+      <td>${linked ? `<a href="javascript:void(0)" onclick="UI.dispatchDetail('${linked.id}')">${NK.esc(linked.no)}</a>` : (l.dispatchStatus === '待创建派单' ? `<button class="btn btn-sm btn-accent" onclick="UI.leaveCreateDispatch('${l.leaveId}')">去创建</button>` : '—')}</td>
+      <td>${l.remark ? `<span title="${NK.esc(l.remark)}">${NK.esc(String(l.remark).slice(0, 12))}${String(l.remark).length > 12 ? '…' : ''}</span>` : '—'}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-sm" onclick="UI.leaveDetail('${l.leaveId}')">查看</button>
+        ${l.recordStatus === '有效' ? `<button class="btn btn-sm" onclick="UI.leaveEdit('${l.leaveId}')">编辑</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+
+  body.innerHTML = `
+    <div class="leave-toolbar">
+      <div class="leave-scopes">
+        ${scopes.map(s => `<button class="res-tab${scope === s ? ' active' : ''}" onclick="NK.leaveFilter.scope='${s}';UI.renderLeaveRecords(document.getElementById('resTabBody'))">${s}</button>`).join('')}
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-accent" onclick="UI.leaveCreate()">＋ 登记休假</button>
+      </div>
+    </div>
+    <div class="card"><div class="table-wrap"><table class="tbl">
+      <thead><tr><th>工程师</th><th>开始日期</th><th>时段</th><th>负责职场</th><th>补位状态</th><th>关联派单</th><th>备注</th><th>操作</th></tr></thead>
+      <tbody>${rows || UI.empty(list.length ? '无匹配休假记录' : '还没有休假记录，点击右上角「登记休假」记录第一条 🌴', 8)}</tbody>
+    </table></div></div>`;
+};
+
+/** 登记休假弹窗（极简表单 + 是否需要派单判断） */
+UI.leaveCreate = (prefillEngName) => {
+  const engOpts = NK.db.engineers.map(e => `<option value="${NK.esc(e.id)}" ${prefillEngName && e.name === prefillEngName ? 'selected' : ''}>${NK.esc(NK.v.engName(e.name))}</option>`).join('');
+  const today = NK.today();
+  const body = `
+    <div class="form-item"><label>休假工程师</label>
+      <select id="lvEng" onchange="UI.leaveEngChanged()">${engOpts}</select>
+      <div id="lvEngSum" class="hint" style="margin-top:4px"></div>
+    </div>
+    <div class="form-grid">
+      <div class="form-item"><label>开始日期 *</label><input type="date" id="lvStart" value="${today}" onchange="UI.leaveDateChanged()"></div>
+      <div class="form-item"><label>结束日期 *</label><input type="date" id="lvEnd" value="${today}" onchange="UI.leaveDateChanged()"></div>
+    </div>
+    <div class="form-item"><label>休假时段</label>
+      <select id="lvPeriod" onchange="UI.leaveDateChanged()"><option>全天</option><option>上午</option><option>下午</option></select>
+    </div>
+    <div class="form-item"><label>备注</label><textarea id="lvRemark" rows="2" placeholder="需要补充的工作安排，可不填。"></textarea></div>
+    <div id="lvSuggest" class="leave-suggest" style="display:none"></div>
+    <div id="lvDispatchAsk" class="leave-dispatch-ask" style="display:none">
+      <div class="leave-ask-title">该工程师休假期间，是否需要安排补位派单？</div>
+      <div id="lvAskInfo" class="leave-ask-info"></div>
+      <div class="leave-ask-btns">
+        <button class="btn btn-accent" id="lvNeedDispatch">需要，创建补位派单</button>
+        <button class="btn" id="lvNoDispatch">不需要，只记录休假</button>
+      </div>
+    </div>`;
+  UI.modal('登记休假', body,
+    `<button class="btn" data-close>取消</button>`,
+    { size: 'modal-md', onMount(root) {
+      UI.leaveEngChanged();
+      UI.leaveDateChanged();
+      root.querySelector('#lvNeedDispatch').onclick = () => UI.leaveSave(true, root);
+      root.querySelector('#lvNoDispatch').onclick = () => UI.leaveSave(false, root);
+    } });
+};
+
+/** 工程师选择变化：显示摘要 */
+UI.leaveEngChanged = () => {
+  const sel = document.getElementById('lvEng');
+  if (!sel) return;
+  const eng = NK.db.engineers.find(e => e.id === sel.value);
+  const sum = document.getElementById('lvEngSum');
+  if (!eng || !sum) return;
+  const sites = NK.sitesByEngineer(eng.name);
+  const onsite = (eng.onsiteRegions || []).join('、') || '—';
+  const remote = (eng.remoteRegions || []).join('、') || '—';
+  const sitesLabel = sites.map(s => NK.v.siteName(s.name)).join('、') || '—';
+  sum.innerHTML = `<b>${NK.esc(NK.v.engName(eng.name))}</b> · 驻场：${NK.esc(onsite)} · 远程：${NK.esc(remote)}<br>负责职场：${NK.esc(sitesLabel)}`;
+  UI.leaveDateChanged();
+};
+
+/** 日期/时段变化：更新天数、建议、是否需要派单询问 */
+UI.leaveDateChanged = () => {
+  const engSel = document.getElementById('lvEng');
+  const start = document.getElementById('lvStart');
+  const end = document.getElementById('lvEnd');
+  const period = document.getElementById('lvPeriod');
+  if (!engSel || !start || !end || !period) return;
+  const eng = NK.db.engineers.find(e => e.id === engSel.value);
+  const days = NK.daysBetween(start.value, end.value) + 1;
+  // 结束日期不得早于开始
+  if (end.value && start.value && end.value < start.value) end.value = start.value;
+  const tips = eng ? NK.leaveSuggestions(eng, start.value, end.value, period.value) : [];
+  const sug = document.getElementById('lvSuggest');
+  if (sug) {
+    sug.innerHTML = tips.map(t => `<div class="ls-tip">· ${NK.esc(t)}</div>`).join('');
+    sug.style.display = tips.length ? '' : 'none';
+  }
+  // 询问是否需要派单（每次登记都必须出现）
+  const ask = document.getElementById('lvDispatchAsk');
+  const info = document.getElementById('lvAskInfo');
+  if (ask && info && eng) {
+    const sites = NK.sitesByEngineer(eng.name);
+    const sitesLabel = sites.map(s => NK.v.siteName(s.name)).join('、') || '（无固定驻场职场）';
+    info.textContent = `${eng.name}负责 ${sitesLabel}。本次休假：${start.value} 至 ${end.value}，共 ${days} 天。`;
+    ask.style.display = '';
+  }
+};
+
+/** 保存休假。needDispatch: true=需要派单，false=无需派单 */
+UI.leaveSave = (needDispatch, root) => {
+  const engSel = root.querySelector('#lvEng');
+  const start = root.querySelector('#lvStart');
+  const end = root.querySelector('#lvEnd');
+  const period = root.querySelector('#lvPeriod');
+  const remark = root.querySelector('#lvRemark');
+  if (!engSel.value) { UI.toast('请选择休假工程师', 'warn'); return; }
+  if (!start.value || !end.value) { UI.toast('请选择休假日期', 'warn'); return; }
+  if (end.value < start.value) { UI.toast('结束日期不能早于开始日期', 'warn'); return; }
+  // 1) 先保存休假记录（无论是否派单，先落库，避免跳转派单后数据丢失）
+  const rec = NK.createLeave({
+    engineerId: engSel.value,
+    startDate: start.value,
+    endDate: end.value,
+    leavePeriod: period.value,
+    remark: remark.value.trim(),
+    dispatchRequired: needDispatch ? '是' : '否',
+    dispatchStatus: needDispatch ? '待创建派单' : '无需派单',
+  });
+  if (!rec) { UI.toast('保存失败，请重试', 'warn'); return; }
+  UI.modalClose();
+  UI.toast('花姐，休假记录已经记下来了。🌴');
+  UI.renderResources();
+  if (needDispatch) {
+    // 2) 需要派单：跳转到现有派单页面并预填该工程师的职场与补位原因
+    UI.leaveCreateDispatch(rec.leaveId);
+  }
+};
+
+/** 创建补位派单：预填休假工程师负责职场 + 补位原因 */
+UI.leaveCreateDispatch = (leaveId) => {
+  const l = NK.getLeave(leaveId);
+  if (!l) return;
+  const sites = (l.responsibleSitesSnapshot || []).slice();
+  if (!sites.length) { UI.toast('该工程师无固定驻场职场，可直接手动派单', 'warn'); UI.nav('dispatch'); return; }
+  if (sites.length === 1) {
+    // 单一职场：直接带出
+    const site = NK.getSite(sites[0].siteId);
+    UI.dispatchCreate(sites[0].siteId, {
+      prefillReason: `${l.engineerName}于${l.startDate}至${l.endDate}休假，需安排${NK.v.siteName(sites[0].siteName)}IT现场支持补位。`,
+      excludeEngineer: l.engineerName,
+      leaveId: l.leaveId,
+    });
+  } else {
+    // 多职场：先让花姐选择本次为哪些职场安排补位
+    const opts = sites.map(s => `<label class="leave-site-chk"><input type="checkbox" value="${s.siteId}"> ${NK.esc(NK.v.siteName(s.siteName))} <span class="num" style="font-size:11px;color:var(--text-3)">${NK.esc(s.city)} · ${NK.esc(s.supportType)}</span></label>`).join('');
+    UI.modal('本次需要为哪些职场安排补位？', `<div class="leave-site-picker">${opts}</div>`,
+      `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="lsOk">下一步</button>`, {
+      onMount(root) {
+        root.querySelector('#lsOk').onclick = () => {
+          const picked = [...root.querySelectorAll('input:checked')].map(i => i.value);
+          if (!picked.length) { UI.toast('请至少选择一个职场', 'warn'); return; }
+          UI.modalClose();
+          const site = NK.getSite(picked[0]);
+          UI.dispatchCreate(site.id, {
+            prefillReason: `${l.engineerName}于${l.startDate}至${l.endDate}休假，需安排${NK.v.siteName(site.name)}IT现场支持补位。`,
+            excludeEngineer: l.engineerName,
+            leaveId: l.leaveId,
+          });
+        };
+      },
+    });
+  }
+};
+
+/** 休假记录详情 */
+UI.leaveDetail = (leaveId) => {
+  const l = NK.getLeave(leaveId);
+  if (!l) return;
+  const linked = l.relatedDispatchId ? NK.getDispatch(l.relatedDispatchId) : null;
+  const sitesLabel = (l.responsibleSitesSnapshot || []).map(s => `${NK.v.siteName(s.siteName)}（${s.city}）`).join('、') || '—';
+  const days = NK.daysBetween(l.startDate, l.endDate) + 1;
+  const vName = NK.v.engName(l.engineerName);
+  UI.modal(`休假记录 · ${vName}`, `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+      <span style="font-size:16px;font-weight:700">${NK.esc(vName)}</span>
+      ${l.recordStatus === '已取消' ? '<span class="badge gray">已取消</span>' : '<span class="badge ok">休假中/计划中</span>'}
+      ${UI.leaveStatusBadge(l.dispatchStatus)}
+    </div>
+    <div class="detail-grid">
+      <div class="dg-item"><div class="dg-label">休假日期</div><div class="dg-val">${NK.esc(l.startDate)} 至 ${NK.esc(l.endDate)}（${days} 天）</div></div>
+      <div class="dg-item"><div class="dg-label">时段</div><div class="dg-val">${NK.esc(l.leavePeriod)}</div></div>
+      <div class="dg-item"><div class="dg-label">负责职场</div><div class="dg-val">${NK.esc(sitesLabel)}</div></div>
+      <div class="dg-item"><div class="dg-label">补位派单</div><div class="dg-val">${linked ? `<a href="javascript:void(0)" onclick="UI.dispatchDetail('${linked.id}')">${NK.esc(linked.no)}</a>` : '—'}</div></div>
+    </div>
+    ${l.remark ? `<div class="hint">备注：${NK.esc(l.remark)}</div>` : ''}
+    <div class="hint" style="color:var(--text-3)">登记于 ${l.createdAt.slice(0, 16).replace('T', ' ')}${l.cancelledAt ? ' · 取消于 ' + l.cancelledAt.slice(0, 16).replace('T', ' ') : ''}</div>`,
+    `<button class="btn" data-close>关闭</button>
+     ${l.recordStatus === '有效' ? `
+       ${l.dispatchStatus === '待创建派单' ? `<button class="btn btn-accent" onclick="UI.leaveCreateDispatch('${l.leaveId}')">创建补位派单</button>` : ''}
+       <button class="btn" onclick="UI.leaveEdit('${l.leaveId}')">编辑</button>
+       <button class="btn btn-danger" onclick="UI.leaveCancel('${l.leaveId}')">取消休假</button>` : ''}`,
+    { size: 'modal-md' });
+};
+
+/** 编辑休假 */
+UI.leaveEdit = (leaveId) => {
+  const l = NK.getLeave(leaveId);
+  if (!l) return;
+  const engOpts = NK.db.engineers.map(e => `<option value="${NK.esc(e.id)}" ${e.name === l.engineerName ? 'selected' : ''}>${NK.esc(NK.v.engName(e.name))}</option>`).join('');
+  const body = `
+    <div class="form-item"><label>休假工程师</label><select id="leEng">${engOpts}</select></div>
+    <div class="form-grid">
+      <div class="form-item"><label>开始日期 *</label><input type="date" id="leStart" value="${l.startDate}"></div>
+      <div class="form-item"><label>结束日期 *</label><input type="date" id="leEnd" value="${l.endDate}"></div>
+    </div>
+    <div class="form-item"><label>休假时段</label><select id="lePeriod">
+      ${NK.LEAVE_PERIODS.map(p => `<option ${l.leavePeriod === p ? 'selected' : ''}>${p}</option>`).join('')}
+    </select></div>
+    <div class="form-item"><label>备注</label><textarea id="leRemark" rows="2">${NK.esc(l.remark || '')}</textarea></div>
+    ${l.relatedDispatchId ? `<div class="hint" style="color:var(--warn)">该记录已关联补位派单 ${NK.esc(l.relatedDispatchNo || '')}。休假时间调整后，请确认关联补位派单是否也需要修改。</div>` : ''}`;
+  UI.modal('编辑休假', body,
+    `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="leOk">保存</button>`, {
+    onMount(root) {
+      root.querySelector('#leOk').onclick = () => {
+        const start = root.querySelector('#leStart').value;
+        const end = root.querySelector('#leEnd').value;
+        if (!start || !end || end < start) { UI.toast('请检查休假日期', 'warn'); return; }
+        const eng = NK.db.engineers.find(e => e.id === root.querySelector('#leEng').value);
+        if (!eng) { UI.toast('请选择工程师', 'warn'); return; }
+        // 若工程师变化，需重算快照
+        if (eng.name !== l.engineerName) {
+          l.engineerId = eng.id; l.engineerName = eng.name;
+          const sites = NK.sitesByEngineer(eng.name);
+          l.responsibleSitesSnapshot = sites.map(s => ({
+            siteId: s.id, siteName: s.name, city: s.city,
+            supportType: s.supportType || '远程', contactName: s.contactName || '',
+            defaultEngineer: s.defaultEngineer || '',
+          }));
+        }
+        NK.updateLeave(l.leaveId, {
+          startDate: start, endDate: end,
+          leavePeriod: root.querySelector('#lePeriod').value,
+          remark: root.querySelector('#leRemark').value.trim(),
+        });
+        UI.modalClose();
+        UI.toast('花姐，休假记录已更新 ✓');
+        UI.renderResources();
+      };
+    },
+  });
+};
+
+/** 取消休假 */
+UI.leaveCancel = (leaveId) => {
+  const l = NK.getLeave(leaveId);
+  if (!l) return;
+  const linked = l.relatedDispatchId ? NK.getDispatch(l.relatedDispatchId) : null;
+  UI.confirm(`确定取消${NK.v.engName(l.engineerName)}${l.startDate}至${l.endDate}的休假记录吗？`,
+    () => {
+      NK.cancelLeave(leaveId);
+      UI.modalClose();
+      if (linked) {
+        UI.confirm(`该休假已关联补位派单 ${NK.esc(linked.no)}。补位派单不会自动删除，请自行确认该派单是否仍然需要。`, () => {}, '我知道了');
+      }
+      UI.toast('花姐，休假已取消。');
+      UI.renderResources();
+    }, '确定取消');
+};
+
 
 /* ============================================================
    KPI绩效
@@ -3415,14 +3876,14 @@ UI.init = () => {
   }
   document.getElementById('modeSwitch').onclick = () => UI.toggleMode();
   // 每日任务与首屏
-  NK.ensureDailyTasks();
+  NK.ensureFixedTasks();
   NK.save();
   UI.nav('home');
   UI.refreshBadges();
   // 定时刷新提醒
   if (NK.globalTimer) clearInterval(NK.globalTimer);
   NK.globalTimer = setInterval(() => {
-    NK.ensureDailyTasks();
+    NK.ensureFixedTasks();
     NK.save();
     UI.refreshBadges();
     if (NK.currentView === 'home') UI.renderHome();

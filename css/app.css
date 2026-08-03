@@ -954,3 +954,86 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .al-rec-tag.t-danger { background: var(--danger-soft); color: var(--danger); }
 .al-rec-tag.t-warn { background: var(--warn-soft); color: var(--warn); }
 .al-rec-tag.gray { background: #eef1f5; color: var(--text-3); }
+
+/* ============================================================
+   工程师休假记录与驻场补位提醒（Leave）
+   只记录休假 + 是否需补位，不开发考勤/审批/申请
+   ============================================================ */
+
+/* 资源页三页签 */
+.res-tabs {
+  display: flex; gap: 6px; align-items: center; margin: 0 0 14px;
+  padding: 4px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 10px; width: fit-content;
+}
+.res-tab {
+  border: none; background: transparent; color: var(--text-2);
+  font-size: 13px; font-weight: 600; padding: 6px 16px; border-radius: 7px;
+  cursor: pointer; transition: all .15s;
+}
+.res-tab:hover { color: var(--primary); background: var(--accent-soft); }
+.res-tab.active { background: var(--panel); color: var(--primary); box-shadow: var(--shadow); }
+
+/* 休假记录工具栏 */
+.leave-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.leave-scopes { display: flex; gap: 6px; }
+
+/* 登记休假弹窗 */
+.leave-suggest { margin-top: 4px; margin-bottom: 12px; }
+.leave-suggest-item, .ls-tip {
+  display: flex; align-items: flex-start; gap: 7px; padding: 7px 10px; margin-bottom: 5px;
+  border-radius: 8px; background: var(--warn-soft); font-size: 12px; color: var(--text-2); line-height: 1.5;
+}
+
+/* 是否需要派单询问区 */
+.leave-dispatch-ask {
+  margin-top: 6px; padding: 12px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--bg); margin-bottom: 8px;
+}
+.leave-dispatch-ask-t, .leave-ask-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+.leave-ask-info { font-size: 12px; color: var(--text-2); line-height: 1.7; margin-bottom: 8px; }
+.leave-dispatch-ask-btns, .leave-ask-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+.leave-dispatch-ask-btns .btn, .leave-ask-btns .btn { flex: 1; justify-content: center; }
+
+/* 补位职场选择器 */
+.leave-site-picker { display: flex; flex-direction: column; gap: 8px; }
+.leave-site-chk {
+  display: flex; align-items: center; gap: 9px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--panel); cursor: pointer; font-size: 13px;
+}
+.leave-site-chk:hover { border-color: var(--accent); background: var(--accent-soft); }
+.leave-site-chk input { accent-color: var(--accent); }
+
+/* 首页 · 今日休假提醒 */
+.dash-leave { margin-bottom: 12px; }
+.lr-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px;
+  padding: 9px 14px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--panel); font-size: 12.5px; color: var(--text-2);
+  cursor: pointer; transition: all .15s;
+}
+.lr-row:hover { border-color: var(--accent); background: var(--accent-soft); }
+.lr-need { border-color: var(--warn); background: var(--warn-soft); }
+.lr-need:hover { filter: brightness(.98); }
+.lr-none { cursor: default; color: var(--text-3); background: transparent; border-color: transparent; padding: 2px 6px; }
+.lr-none:hover { border-color: transparent; background: transparent; }
+.lr-emoji { font-size: 14px; }
+.lr-title { font-weight: 600; color: var(--text); }
+.lr-need .lr-title { color: var(--warn); }
+.lr-person { display: inline-flex; align-items: center; gap: 5px; }
+.lr-period { color: var(--text-3); font-size: 11.5px; }
+.lr-tag { font-size: 10.5px; padding: 1px 7px; border-radius: 8px; font-weight: 600; }
+.lr-tag.lr-ok { background: var(--ok-soft); color: var(--ok); }
+.lr-tag.lr-warn { background: var(--warn-soft); color: var(--warn); }
+.lr-tag.lr-mute { background: #eef1f5; color: var(--text-3); }
+.lr-btn {
+  border: none; background: var(--accent); color: #fff; font-size: 11.5px; font-weight: 600;
+  padding: 5px 12px; border-radius: 8px; cursor: pointer; transition: all .15s;
+}
+.lr-btn:hover { filter: brightness(1.08); }
+
+/* 今日休假详情抽屉 */
+.lr-d-list { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow: auto; }
+.lr-d-item { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--panel); }
+.lr-d-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13.5px; }
+.lr-d-sub { font-size: 11.5px; color: var(--text-2); margin-top: 5px; line-height: 1.6; }

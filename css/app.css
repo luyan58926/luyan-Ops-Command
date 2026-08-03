@@ -288,6 +288,16 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .fi-dot { font-size: 6px; line-height: 1; flex-shrink: 0; }
 .fi-dot-danger { color: var(--danger); }
 
+/* 重点事项 · 派单任务上门日期（辅助信息，视觉权重低于任务名）
+   任务名沿用深色；括号内上门日期用浅灰紫、12px（比任务名小2px）、正常字重
+   不做成彩色标签、不用 Emoji、不单独换行；宽度不足时随整条自然换行，无横向滚动 */
+.focus-task-title { color: var(--text); }
+.focus-task-onsite {
+  margin-left: 2px;
+  color: #7a8091; font-size: 12px; font-weight: 400;
+  white-space: normal; vertical-align: baseline;
+}
+
 /* 时间轴（保持原有样式） */
 .timeline { position: relative; padding-left: 20px; }
 .timeline::before { content: ''; position: absolute; left: 7px; top: 4px; bottom: 4px; width: 2px; background: var(--border); }

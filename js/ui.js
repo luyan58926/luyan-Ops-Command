@@ -505,6 +505,24 @@ UI.fmtOnsite = (dateValue, now) => {
 };
 
 /* ============================================================
+   首页重点事项 · 派单任务上门日期
+   - 仅对 type==='task' 且真实关联派单的重点事项，在任务名后追加「（上门：X月X日）」
+   - 关联判断：复用 NK.dispatchOfTask（优先 dispatchId，其次 sourceType==='dispatch' 的 sourceId）
+   - 无效派单（已撤销/取消/删除软删）已被 NK.taskActive 过滤，不会重新出现
+   - 复用 UI.fmtOnsite 与今日时间轴同一套格式化逻辑，保证两个位置日期一致
+   - 普通/专项/日常/派单自身条目(type==='dispatch')不显示 → 返回 ''
+   ============================================================ */
+UI.focusOnsite = (f) => {
+  if (!f || f.type !== 'task' || !f.itemId) return '';
+  const t = NK.getTask(f.itemId);
+  if (!t || !NK.taskActive(t)) return '';
+  const d = NK.dispatchOfTask(t);
+  if (!d) return '';
+  const v = d.visitDate || d.planArrive || '';
+  return `<span class="focus-task-onsite">（${UI.fmtOnsite(v)}）</span>`;
+};
+
+/* ============================================================
    今日指挥台 v2 — 四区域结构
    ============================================================ */
 UI.renderHome = () => {
@@ -554,10 +572,12 @@ UI.renderHome = () => {
     const dot = f.tagLevel === 'danger'
       ? '<span class="fi-dot fi-dot-danger">●</span>'
       : '';
+    // 派单任务在任务名后补充真实上门日期（读取关联派单 visitDate），非派单事项为空
+    const onsite = UI.focusOnsite(f);
     return `
     <div class="fi-item${f.actionAct ? ' fi-clickable' : ''}"${f.actionAct ? ` onclick="${NK.esc(f.actionAct)}"` : ''}>
       <span class="fi-num">${num}</span>${dot}
-      <span class="fi-name">${NK.esc(f.title)}</span>
+      <span class="fi-name"><span class="focus-task-title">${NK.esc(f.title)}</span>${onsite}</span>
     </div>`;
   }).join('') : `
     <div class="fc-empty">

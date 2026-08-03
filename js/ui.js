@@ -36,6 +36,8 @@ UI.copy = async (text) => {
   }
 };
 UI.empty = (msg, col) => `<tr><td colspan="${col || 6}" class="tbl-empty">${msg}</td></tr>`;
+/** 清空告警按钮用轻量线性图标（清扫/归档感，非红色垃圾桶） */
+UI.ICON_CLEAR = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>`;
 UI.modal = (title, bodyHTML, footHTML, opts) => {
   opts = opts || {};
   const root = document.getElementById('modalRoot');
@@ -141,7 +143,7 @@ UI.renderHome = () => {
   const waitAccept = disps.filter(d => d.status === '待花姐验收').length;
   const overdue = rem.filter(x => x.title.includes('超时')).length;
 
-  // ── 区域3：横向轻量快捷入口条（6个全部显示）─────────────────────────────
+  // ── 区域3：横向轻量快捷入口条 ──────────────────────────────
   const quickCards = [
     { icon: '📋', label: '新建派单', sub: '30秒搞定', primary: true, act: 'UI.dispatchCreate()' },
     { icon: '📝', label: '快速记录', sub: '先记下来，别让它溜走', act: 'UI.quickNote()' },
@@ -149,6 +151,8 @@ UI.renderHome = () => {
     { icon: '🔄', label: '更新进度', sub: '补一句反馈', act: 'UI.taskCreate(true)' },
     { icon: '📊', label: '登记KPI', sub: '加分扣分都留痕', act: 'UI.kpiEventCreate()' },
     { icon: '📄', label: '生成交接', sub: '一键整理今日', act: 'UI.handoverToday()' },
+    { icon: '🖨️', label: '收到耗材提醒', sub: '记一条跟进', act: "UI.triggerFixed('TPL005')" },
+    { icon: '🔐', label: '记录登录失败告警', sub: '安全告警跟进', act: "UI.triggerFixed('TPL006')" },
   ];
   const quickCardsHTML = quickCards.map(q => 
     `<a class="quick-card ${q.primary ? 'qc-primary' : ''}" href="javascript:void(0)" onclick="${q.act}">
@@ -185,22 +189,28 @@ UI.renderHome = () => {
     <div class="fc-body">${focusItemsHTML}</div>
   </div>`;
 
-  // ── 区域4b：今日时间轴（定时模板 + 今日新建任务 + 今日新建专项）──
+  // ── 区域4b：今日时间轴（固定任务 + 今日新建任务 + 今日新建专项）──
   const tl = [];
-  // 1) 每日定时模板
-  NK.db.handoverTemplates.forEach(t => {
-    if ((t.frequency || '').includes('每日')) {
-      const time = t.frequency === '每日14:30' ? '14:30' : (t.frequency.includes('下班') ? '下班前' : '每日');
-      const done = NK.db.tasks.find(x => x.templateId === t.id && x.status === '已完成');
-      tl.push({
-        sort: time === '每日' ? '0800' : time === '下班前' ? '1800' : time.replace(':', ''),
-        time, kind: 'tpl', name: t.name, note: t.requirement, pri: t.priority,
-        done: !!done, status: done ? '已完成' : '待处理',
-      });
-    }
+  // 1) 每日/月度固定任务实例：只显示今天确实存在的实例（固定任务去重，不堆叠）
+  //    每日类：今日实例；月度类：当月实例（月报/月会满足条件后才会生成）
+  const todayFixed = tasks.filter(t => t.source === '系统固定任务' &&
+    (t.fixedDate === today || t.fixedYM === today.slice(0, 7)));
+  todayFixed.forEach(t => {
+    const tpl = NK.FIXED_TASKS.find(x => x.id === t.templateId);
+    const freq = t.frequency || (tpl && tpl.frequency) || '';
+    const isDaily = ['每日', '每日14:30', '每日下班前'].includes(freq);
+    // 月度类只显示月报/月会；触发类只在触发后出现（此时已生成今日实例）
+    if (!isDaily && !['每月', '月报完成后'].includes(freq)) return;
+    const time = t.fixedTime === '14:30' ? '14:30' : (t.fixedTime === '下班前' ? '下班前' : (t.fixedTime === '每月初' ? '每月' : '每日'));
+    const done = t.status === '已完成';
+    tl.push({
+      sort: time === '每日' ? '0800' : time === '下班前' ? '1800' : time === '每月' ? '2400' : (String(time).replace(':', '') || '0800'),
+      time, kind: 'tpl', name: t.name, note: tpl ? tpl.requirement : '', pri: t.priority,
+      done, status: t.status, taskId: t.id,
+    });
   });
-  // 2) 今日新建的任务（排除日常模板，避免与定时条目重复）
-  tasks.filter(t => (t.createdAt || '').slice(0, 10) === today && t.source !== '日常模板')
+  // 2) 今日新建的任务（排除固定任务实例，避免与定时条目重复）
+  tasks.filter(t => (t.createdAt || '').slice(0, 10) === today && t.source !== '系统固定任务')
     .forEach(t => {
       tl.push({
         sort: (t.createdAt || '23:59:59').slice(11, 16).replace(':', '') || '2359',
@@ -250,11 +260,13 @@ UI.renderHome = () => {
       ${tl.length ? `<div class="timeline">${tl.map(t => {
         const jump = t.kind === 'task'
           ? ` onclick="UI.nav('tasks')" title="点击查看任务"`
-          : t.kind === 'project'
-            ? ` onclick="UI.nav('projects')" title="点击查看专项"`
-            : t.click
-              ? ` onclick="${t.click}" title="点击查看详情"`
-              : '';
+          : t.kind === 'tpl' && t.taskId
+            ? ` onclick="UI.taskDetail('${t.taskId}')" title="点击查看任务"`
+            : t.kind === 'project'
+              ? ` onclick="UI.nav('projects')" title="点击查看专项"`
+              : t.click
+                ? ` onclick="${t.click}" title="点击查看详情"`
+                : '';
         const clickAttr = jump ? ` class="tl-item ${t.done ? 'tl-done' : ''} tl-link"${jump}` : ` class="tl-item ${t.done ? 'tl-done' : ''}"`;
         return `<div ${clickAttr}>
           <span class="tl-time">${t.time}</span>
@@ -302,6 +314,16 @@ UI.renderHome = () => {
 UI.resourcesJump = () => {
   UI.nav('resources');
   setTimeout(() => document.getElementById('resSearch') && document.getElementById('resSearch').focus(), 80);
+};
+
+/** 触发式固定任务快捷入口（耗材提醒 / 登录失败告警 / 内部派单协调） */
+UI.triggerFixed = (tplId) => {
+  const tpl = NK.FIXED_TASKS.find(t => t.id === tplId);
+  if (!tpl) return;
+  const task = NK.triggerTask(tplId);
+  if (!task) { UI.toast('触发失败，请重试', 'warn'); return; }
+  UI.toast(`已记录「${tpl.name}」待跟进 ✓`);
+  UI.nav('tasks');
 };
 
 /* ============================================================
@@ -591,6 +613,18 @@ UI.dispatchCreate = (siteId) => {
           source: '花姐手动创建',
           planArrive: arriveInput.value,
         });
+
+        // 内部派单协调：优先关联今日已存在的待处理派单协调任务，避免重复创建
+        const _today = NK.today();
+        const coordTask = NK.db.tasks.find(t =>
+          t.templateId === 'TPL011' && t.status !== '已完成' &&
+          (t.fixedDate === _today || t.createdAt.slice(0, 10) === _today));
+        if (coordTask) {
+          coordTask.dispatchId = d.id;
+          coordTask.latestFeedback = '已生成关联派单 ' + d.no;
+          coordTask.updatedAt = NK.now();
+          NK.save();
+        }
 
         wrap.classList.add('hidden');
         root.querySelector('#dpSuccessTitle').textContent =
@@ -993,6 +1027,10 @@ UI.renderTasks = () => {
   let list = [...NK.db.tasks].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   if (f.status && f.status !== '全部') list = list.filter(t => t.status === f.status);
   if (f.type && f.type !== '全部') list = list.filter(t => t.type === f.type);
+  if (f.source && f.source !== '全部') {
+    if (f.source === '已完成') list = list.filter(t => t.status === '已完成');
+    else list = list.filter(t => NK.taskSourceKey(t) === f.source);
+  }
   if (f.q) list = list.filter(t => `${t.no} ${t.name} ${t.siteName} ${t.engineer}`.includes(f.q));
   if (f.overdue) list = list.filter(t => t.dueDate && t.dueDate < today && t.status !== '已完成');
 
@@ -1001,25 +1039,36 @@ UI.renderTasks = () => {
   const danger = rem.filter(x => x.level === 'danger');
   const warn = rem.filter(x => x.level !== 'danger');
 
-  // 今日模板任务进度
-  const dailyTpls = NK.db.handoverTemplates.filter(t => (t.frequency || '').includes('每日'));
-  const todayTasks = NK.db.tasks.filter(t => t.source === '日常模板' && t.createdAt.slice(0, 10) === today);
-  const dailyHTML = `<div class="card"><div class="card-head"><div class="card-title">今日日常任务（模板）</div>
-    <span class="badge accent">${todayTasks.filter(x => x.status === '已完成').length}/${dailyTpls.length} 完成</span></div>
-    <div class="card-body flush">${dailyTpls.length ? dailyTpls.map(t => {
-      const tk = todayTasks.find(x => x.name === t.name);
-      const done = tk && tk.status === '已完成';
+  // 今日固定任务（系统固定任务·每日类）进度
+  const dailyTasks = NK.db.tasks.filter(t => t.source === '系统固定任务' &&
+    ['每日', '每日14:30', '每日下班前'].includes(t.frequency) && t.fixedDate === today);
+  const dailyHTML = `<div class="card"><div class="card-head"><div class="card-title">今日固定任务（每日）</div>
+    <span class="badge accent">${dailyTasks.filter(x => x.status === '已完成').length}/${dailyTasks.length} 完成</span></div>
+    <div class="card-body flush">${dailyTasks.length ? dailyTasks.map(t => {
+      const tpl = NK.FIXED_TASKS.find(x => x.id === t.templateId);
+      const done = t.status === '已完成';
       return `<div class="focus-item">
         <span class="badge ${done ? 'done' : 'wait'}">${done ? '✓' : '待办'}</span>
         <div class="fi-main">
           <div class="fi-title">${NK.esc(t.name)} ${UI.priBadge(t.priority)}</div>
-          <div class="fi-meta">${NK.esc(t.requirement || '')} · ${NK.esc(t.frequency || '')}</div>
+          <div class="fi-meta">${NK.esc(tpl ? tpl.requirement : t.nextAction || '')} · ${NK.esc(t.frequency || '')}${t.fixedTime ? ' · ' + NK.esc(t.fixedTime) : ''}</div>
         </div>
-        <div class="fi-actions">${tk ? (done ? `<span style="font-size:11px;color:var(--text-3)">已完成</span>` : `<button class="btn btn-sm btn-accent" onclick="UI.taskDone('${tk.id}')">标为完成</button>`) : `<button class="btn btn-sm" onclick="UI.taskCreate()">补建任务</button>`}</div>
+        <div class="fi-actions">${done ? `<span style="font-size:11px;color:var(--text-3)">已完成</span>` : `<button class="btn btn-sm btn-accent" onclick="UI.taskDone('${t.id}')">标为完成</button>`}</div>
       </div>`;
-    }).join('') : '<div class="tbl-empty" style="padding:24px">暂无每日模板</div>'}</div></div>`;
+    }).join('') : '<div class="tbl-empty" style="padding:24px">今日每日固定任务已全部完成 ✨</div>'}</div></div>`;
 
-  const alertHTML = `<div class="card"><div class="card-head"><div class="card-title">实时告警</div><span class="badge ${danger.length ? 'risk' : 'done'}">${danger.length} 危险 / ${warn.length} 提醒</span></div>
+  const alertHTML = `<div class="card"><div class="card-head"><div class="card-title">实时告警</div><span class="badge ${danger.length ? 'risk' : 'done'}">${danger.length} 危险 / ${warn.length} 提醒</span>
+      <span class="al-head-actions">
+        <button class="btn btn-sm btn-ghost al-clear-btn${rem.length ? '' : ' is-disabled'}"${rem.length ? '' : ' disabled title="当前没有需要清空的告警"'} onclick="UI.alertClearStart()">${UI.ICON_CLEAR}清空告警</button>
+        <span class="al-more-wrap">
+          <button class="btn btn-sm btn-ghost al-more-btn" onclick="UI.alertMoreToggle(event)">更多 ▾</button>
+          <div class="al-more-menu hidden">
+            <button class="al-more-item" onclick="UI.alertRecordsOpen()">清空记录</button>
+            <button class="al-more-item" onclick="UI.alertCooldownOpen()">冷却时间设置</button>
+          </div>
+        </span>
+      </span>
+    </div>
     <div class="card-body flush">${rem.length ? rem.map(r => `
       <div class="focus-item">
         <span class="badge ${r.level === 'danger' ? 'risk' : r.level === 'accent' ? 'proc' : 'wait'}">${r.level === 'danger' ? '紧急' : r.level === 'accent' ? '验收' : '提醒'}</span>
@@ -1029,12 +1078,14 @@ UI.renderTasks = () => {
 
   const statusOpts = ['全部', ...NK.TASK_STATUS];
   const typeOpts = ['全部', ...NK.TASK_TYPES];
-  el.innerHTML = UI.pageHead('任务与告警', '任务闭环 · 告警驱动 · 每日模板自动生成',
+  const srcOpts = ['全部', '系统固定任务', '花姐手动新增', '安全告警', '派单自动关联', '专项任务', '已完成'];
+  el.innerHTML = UI.pageHead('任务与告警', '任务闭环 · 告警驱动 · 固定任务每日/月度自动生成',
     `<button class="btn btn-accent" onclick="UI.taskCreate()">✚ 新建任务</button>`) +
     `<div class="filter-bar">
       <input class="fb-input" id="tkQ" placeholder="搜索编号/名称/职场/工程师…" value="${NK.esc(f.q || '')}">
       <select class="fb-select" id="tkStatus">${statusOpts.map(s => `<option ${(f.status || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
       <select class="fb-select" id="tkType">${typeOpts.map(s => `<option ${(f.type || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <select class="fb-select" id="tkSource">${srcOpts.map(s => `<option ${(f.source || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
       <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="checkbox" id="tkOverdue" ${f.overdue ? 'checked' : ''}>只看超时</label>
       <span class="spacer"></span><span style="font-size:12px;color:var(--text-3)">共 ${list.length} 条</span>
     </div>
@@ -1048,7 +1099,7 @@ UI.renderTasks = () => {
         return `<tr>
           <td class="num">${t.no}</td>
           <td style="max-width:220px"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${NK.esc(t.name)}</div>
-            <div style="color:var(--text-3);font-size:11px">${NK.esc(t.source || '')}</div></td>
+            <div style="color:var(--text-3);font-size:11px">${NK.esc(NK.taskSourceLabel(t))}</div></td>
           <td><span class="tag">${NK.esc(t.type)}</span></td>
           <td>${UI.priBadge(t.priority)}</td>
           <td>${NK.esc(v.siteName || '—')}</td>
@@ -1071,6 +1122,7 @@ UI.renderTasks = () => {
         q: document.getElementById('tkQ').value,
         status: document.getElementById('tkStatus').value,
         type: document.getElementById('tkType').value,
+        source: document.getElementById('tkSource').value,
         overdue: document.getElementById('tkOverdue').checked,
       };
       UI.renderTasks();
@@ -1078,9 +1130,130 @@ UI.renderTasks = () => {
     document.getElementById('tkQ').addEventListener('input', NK.debounce(onFilter, 300));
     document.getElementById('tkStatus').onchange = onFilter;
     document.getElementById('tkType').onchange = onFilter;
+    document.getElementById('tkSource').onchange = onFilter;
     document.getElementById('tkOverdue').onchange = onFilter;
   };
   setTimeout(bind, 0);
+};
+
+/* ============================================================
+   实时告警 · 一键清空 & 清空记录
+   清空的是当前告警提示，不是删除工作记录。
+   ============================================================ */
+/** 「更多」下拉切换 */
+UI.alertMoreToggle = (ev) => {
+  ev.stopPropagation();
+  const wrap = ev.currentTarget.closest('.al-more-wrap');
+  const menu = wrap.querySelector('.al-more-menu');
+  const wasHidden = menu.classList.contains('hidden');
+  // 关闭其它已打开的下拉
+  document.querySelectorAll('.al-more-menu').forEach(m => m.classList.add('hidden'));
+  menu.classList.toggle('hidden', !wasHidden);
+};
+/** 点击其它区域关闭下拉 */
+UI.alertMoreCloseAll = () => {
+  document.querySelectorAll('.al-more-menu').forEach(m => m.classList.add('hidden'));
+};
+
+/** 打开「清空告警」二次确认弹窗 */
+UI.alertClearStart = () => {
+  const list = NK.alerts();
+  if (!list.length) { UI.toast('花姐，当前没有需要清空的告警 ✨', 'ok'); return; }
+  const danger = list.filter(r => r.level === 'danger').length;
+  const warn = list.length - danger;
+
+  const body = `
+    <div class="al-confirm">
+      <div class="al-confirm-t">确定清空当前 <b>${list.length}</b> 条告警吗？</div>
+      <div class="al-confirm-sub">本操作只清除当前告警提示，不会删除任务、派单、专项或KPI数据。尚未解决的问题如果再次满足告警条件，之后仍会重新出现。</div>
+      <div class="al-confirm-count"><span class="badge risk">${danger} 危险</span><span class="badge wait">${warn} 提醒</span></div>
+    </div>`;
+  UI.modal('清空实时告警', body,
+    `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="alClearOk">确认清空</button>`, {
+      size: 'modal-sm',
+      onMount(root) {
+        root.querySelector('[data-close]').onclick = () => UI.modalClose();
+        root.querySelector('#alClearOk').onclick = () => UI.alertClearDo('all');
+      },
+    });
+};
+
+/** 执行清空（scope: all | warn） */
+UI.alertClearDo = (scope) => {
+  const res = NK.clearAlerts(scope);
+  UI.modalClose();
+  UI.alertMoreCloseAll();
+  const total = res.cleared.length;
+  // 反馈文案（人性化，非冷冰冰的「操作成功」）
+  if (res.keptDanger > 0) {
+    UI.toast(`已清空 ${total} 条告警，另有 ${res.keptDanger} 条严重风险仍需保留。`, 'warn');
+  } else {
+    UI.toast('花姐，当前告警已经清空，今天的面板干净了。✨', 'ok');
+  }
+  UI.renderTasks();
+  UI.refreshBadges();
+};
+
+/** 打开「清空记录」抽屉 */
+UI.alertRecordsOpen = () => {
+  UI.alertMoreCloseAll();
+  const records = NK.alertRecords();
+  const body = records.length
+    ? records.map(rec => {
+        const t = (rec.clearedAt || '').slice(0, 16).replace('T', ' ');
+        return `<div class="al-rec">
+          <div class="al-rec-head">
+            <span class="al-rec-time">${NK.esc(t)}</span>
+            <span class="badge ${rec.keptDanger ? 'wait' : 'done'}">${rec.scope === 'warn' ? '仅提醒' : '全部'}</span>
+          </div>
+          <div class="al-rec-line">${NK.esc(rec.clearedBy)}清空 <b>${rec.total}</b> 条告警：${rec.danger}条危险、${rec.warn}条提醒。${rec.keptDanger ? `另有 ${rec.keptDanger} 条严重风险保留。` : ''}</div>
+          <div class="al-rec-tags">${(rec.alerts || []).slice(0, 4).map(a => `<span class="al-rec-tag ${a.level === 'danger' ? 't-danger' : 't-warn'}">${NK.esc(a.reason)}</span>`).join('')}${(rec.alerts || []).length > 4 ? `<span class="al-rec-tag gray">+${rec.alerts.length - 4}</span>` : ''}</div>
+        </div>`;
+      }).join('')
+    : `<div class="tbl-empty" style="padding:24px">暂无清空记录。清空告警后，这里会保留每次清空的留痕。</div>`;
+  UI.modal('清空记录', `<div class="al-records">${body}</div>`,
+    `<button class="btn" data-close>关闭</button>`, { size: 'modal', onMount(r) { r.querySelector('[data-close]').onclick = () => UI.modalClose(); } });
+};
+
+/** 打开「冷却时间设置」弹窗 */
+UI.alertCooldownOpen = () => {
+  UI.alertMoreCloseAll();
+  const state = NK.db.alertState = NK.db.alertState || { cooldownHours: 2, cleared: {}, records: [] };
+  const val = state.cooldownHours || 2;
+  const body = `
+    <div class="form-grid">
+      <div class="form-item">
+        <label>告警重新触发的冷却时间（小时）</label>
+        <input id="alCool" type="number" min="0" max="168" step="1" value="${val}">
+      </div>
+    </div>
+    <div class="hint" style="margin-top:10px">同一事项、同一原因在清空后，冷却时间内不会立即重复告警；冷却期结束或出现新的状态变化后再重新判断。设置 0 表示无冷却。</div>`;
+  UI.modal('告警冷却时间', body,
+    `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="alCoolOk">保存</button>`, {
+      size: 'modal-sm',
+      onMount(root) {
+        root.querySelector('[data-close]').onclick = () => UI.modalClose();
+        root.querySelector('#alCoolOk').onclick = () => {
+          const v = Math.max(0, Math.min(168, parseInt(document.getElementById('alCool').value || '2', 10) || 0));
+          state.cooldownHours = v;
+          NK.save();
+          UI.modalClose();
+          UI.toast('花姐，告警冷却时间已更新 ✓');
+        };
+      },
+    });
+};
+
+/** 从系统设置页保存冷却时间 */
+UI.alertCooldownSave = () => {
+  const el = document.getElementById('setAlCool');
+  if (!el) return;
+  const state = NK.db.alertState = NK.db.alertState || { cooldownHours: 2, cleared: {}, records: [] };
+  const v = Math.max(0, Math.min(168, parseInt(el.value || '2', 10) || 0));
+  state.cooldownHours = v;
+  NK.save();
+  UI.toast('花姐，告警冷却时间已更新 ✓');
+  UI.renderSettings();
 };
 
 /** 新建任务（arg 为 true 时进入「更新进度」模式） */
@@ -1129,6 +1302,7 @@ UI.taskCreate = (updateMode) => {
           siteId: picked, siteName: site ? site.name : '', siteCity: site ? site.city : '',
           engineer: root.querySelector('#tcEng').value, dueDate: root.querySelector('#tcDue').value,
           nextAction: root.querySelector('#tcNext').value,
+          source: '花姐手动新增',
         });
         if (t.engineer) NK.addReminder(`任务待处理：${t.name}`, `${t.no} · ${t.engineer}`, 'task', t.id);
         NK.save();
@@ -3042,6 +3216,15 @@ UI.renderSettings = () => {
             : `<button class="btn btn-accent" onclick="UI.resSetupFromSettings()">开启密码保护</button>`}
         </div>
         <div class="hint" style="margin-top:10px">密码仅保存在本机浏览器（编码存储）。本应用为纯前端工具，此锁用于防止随手翻看，无法防住懂技术的人通过开发者工具绕过，请勿在其中存放敏感信息。</div>
+      </div></div>
+    <div class="card"><div class="card-head"><div class="card-title">实时告警 · 清空设置</div><span class="badge gray">清空的是提示，不是数据</span></div>
+      <div class="card-body">
+        <div style="font-size:12px;color:var(--text-2);margin-bottom:10px">「清空告警」只清除当前告警提示，不会删除任务、派单、专项或KPI。未解决的问题在冷却期结束后若仍满足条件，会重新告警。</div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <div class="form-item" style="margin:0"><label style="font-size:11px">重新触发冷却（小时）</label><input id="setAlCool" type="number" min="0" max="168" step="1" value="${((NK.db.alertState||{}).cooldownHours) != null ? NK.db.alertState.cooldownHours : 2}" style="width:90px"></div>
+          <button class="btn" onclick="UI.alertCooldownSave()">保存冷却时间</button>
+          <button class="btn" onclick="UI.alertRecordsOpen()">查看清空记录</button>
+        </div>
       </div></div>`;
 
   // 绑定模式切换
@@ -3214,6 +3397,10 @@ UI.init = () => {
   });
   UI.bindSearch();
   UI.bindAssistant();
+  // 点击其它区域关闭「实时告警」更多下拉
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.al-more-wrap')) UI.alertMoreCloseAll();
+  });
   // 模式切换
   const label = document.getElementById('modeLabel');
   const dot = document.querySelector('.mode-switch .mode-dot');

@@ -281,6 +281,55 @@ ok(itemCount === expectedCount, '时间轴项目数量统计与渲染逻辑一�
 // 点击功能保留：派单关联任务条目（kind=task）点击跳转任务页
 ok(/onclick="UI\.nav\('tasks'\)"/.test(html) || /onclick="UI\.taskDetail/.test(html), '任务点击跳转保留');
 
+console.log('== 时间轴不显示行内撤销/标记完成按钮（全任务类型） ==');
+const noUndoBtn = (h) => !/撤销/.test(h) && !/↩/.test(h) && !/标记完成/.test(h) && !/toggleConsumableDone/.test(h);
+// 1) 已完成日常任务（耗材提醒 TPL005）——核心修复对象
+const tplDone = run(`(() => {
+  const t = NK.db.tasks.find(x => x.templateId === 'TPL005');
+  if (!t) return null;
+  NK.setTaskStatus(t, '已完成');
+  return { id: t.id, name: t.name };
+})()`);
+html = renderTL();
+const tplItem = itemHtml(html, 'HP打印机耗材邮件检查（Outlook）');
+ok(!!tplItem, '已完成日常任务（耗材提醒）仍在时间轴');
+ok(!!tplItem && tplItem.includes('tl-done'), '已完成日常任务保留 tl-done（绿色圆点+删除线）');
+ok(!!tplItem && noUndoBtn(tplItem), '已完成日常任务右侧不再显示「撤销」按钮');
+ok(!!tplItem && !/btn\b/.test(tplItem), '已完成日常任务无任何行内按钮残留');
+ok(!!tplItem && tplItem.includes('tl-src-daily') && tplItem.includes('>日常<'), '日常来源标签保留');
+ok(run(`NK.getTask('${tplDone.id}').status === '已完成'`), '移除按钮不改动已完成状态');
+// 2) 确保今日新建任务必然进入时间轴（createdAt 强制为本地今日），验证普通/专项/派单任务类均无按钮
+//    —— 按钮移除位于时间轴公共渲染逻辑，任何任务类型共用同一条渲染分支
+run(`(function(){
+  const now = NK.today() + 'T09:00:00';
+  const t = { id: NK.uid('T'), no: NK.nextNo('task'), name: '按钮回归·普通任务', type: '普通任务', priority: '', source: '手动录入', createdAt: now, status: '已完成', doneAt: now, dispatchId: '', projectId: '' };
+  NK.db.tasks.push(t); NK.save();
+  const p = { id: NK.uid('P'), name: '按钮回归·专项', type: '专项', createdAt: now, updatedAt: now, status: '已完成', progress: 100, priority: '' };
+  NK.db.projects.push(p); NK.save();
+  const dd = NK.createDispatch({ title: '按钮回归·派单', type: '故障', priority: 'P2', supplier: '源晨', planArrive: NK.today() });
+  const dt = NK.db.tasks.find(function(x){ return x.dispatchId === dd.id; });
+  if (dt) { dt.createdAt = now; dt.status = '已完成'; dt.doneAt = now; NK.save(); }
+})()`);
+html = renderTL();
+['按钮回归·普通任务', '按钮回归·专项', '按钮回归·派单'].forEach(function (nm) {
+  const it = itemHtml(html, nm);
+  if (it) {
+    ok(noUndoBtn(it), '已完成任务类型条目不显示撤销按钮：' + nm);
+    ok(!/btn\b/.test(it), '已完成任务类型条目无行内按钮残留：' + nm);
+    ok(it.includes('tl-done'), '已完成任务类型条目保留 tl-done：' + nm);
+  }
+});
+// 3) 全局：整条时间轴不含撤销/标记完成按钮（公共渲染逻辑的权威保证）
+ok(!/↩ 撤销/.test(html) && !/撤销/.test(html) && !/标记完成/.test(html) && !/toggleConsumableDone/.test(html), '整条时间轴不包含撤销/标记完成按钮相关代码');
+// 4) 任务详情页状态管理能力仍保留（底层恢复函数未删除）
+const appSrcChk = fs.readFileSync(path.join(ROOT, 'js', 'ui.js'), 'utf8');
+ok(appSrcChk.includes('UI.toggleConsumableDone'), '底层状态恢复函数 UI.toggleConsumableDone 保留（供其他页面能力）');
+// 恢复测试现场（避免影响统计）
+run(`(() => {
+  const t = NK.db.tasks.find(x => x.name === '山东青岛打印机处理');
+  if (t) NK.setTaskStatus(t, '待处理');
+})()`);
+
 console.log('== 刷新稳定性 ==');
 const htmlA = renderTL();
 const htmlB = renderTL();

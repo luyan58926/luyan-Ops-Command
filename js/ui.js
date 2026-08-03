@@ -642,7 +642,6 @@ UI.renderHome = () => {
     </div>
     <div class="tl-body">
       ${tl.length ? `<div class="timeline">${tl.map(t => {
-        const isConsumable = t.kind === 'tpl' && t.templateId === 'TPL005' && t.taskId;
         const jump = t.kind === 'task'
           ? ` onclick="UI.nav('tasks')" title="点击查看任务"`
           : t.kind === 'tpl' && t.taskId
@@ -653,9 +652,7 @@ UI.renderHome = () => {
                 ? ` onclick="${t.click}" title="点击查看详情"`
                 : '';
         const clickAttr = jump ? ` class="tl-item ${t.done ? 'tl-done' : ''} tl-link"${jump}` : ` class="tl-item ${t.done ? 'tl-done' : ''}"`;
-        const cmplBtn = isConsumable
-          ? `<button class="btn btn-sm ${t.done ? 'btn-ghost' : 'btn-accent'}" style="margin-left:8px;vertical-align:middle" onclick="event.stopPropagation();UI.toggleConsumableDone('${t.taskId}',${t.done})">${t.done ? '↩ 撤销' : '✓ 标记完成'}</button>`
-          : '';
+        // 时间轴仅清晰展示任务状态，不在单条任务右侧放置"撤销/标记完成"操作按钮
         const srcBadge = UI.tlSourceBadge(t);
         // 派单任务在名称后补充上门日期（读取关联派单 visitDate），非派单任务为空
         const onsiteDate = UI.tlOnsiteDate(t);
@@ -669,7 +666,6 @@ UI.renderHome = () => {
           ${priBadge}
           ${t.sub ? `<div class="tl-note">${t.sub}</div>` : ''}
           ${t.prog ? `<span class="tl-prog">${NK.esc(t.prog)}</span>` : ''}
-          ${cmplBtn}
         </div>`;
       }).join('')}</div>` : '<div class="fc-empty"><div class="fc-empty-icon">📅</div><div class="fc-empty-text">今天还没有任务和定时事项<br>有安排随时记进来 ✨</div></div>'}
     </div>

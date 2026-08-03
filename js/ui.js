@@ -300,6 +300,7 @@ document.addEventListener('keydown', (e) => {
 
 /* ================= 导航 ================= */
 UI.nav = (view, arg) => {
+  if (view !== 'home' && UI.__greetingTimer) { clearInterval(UI.__greetingTimer); UI.__greetingTimer = null; }
   NK.currentView = view;
   document.querySelectorAll('#sidebar .nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === view));
   document.querySelectorAll('#main .view').forEach(v => v.classList.add('hidden'));
@@ -342,21 +343,76 @@ UI.pageHead = (title, sub, actions) => `
   </div>`;
 
 /* ============================================================
+   首页问候语 — 统一对象结构（修复 undefined Bug）
+   - getGreetingByTime：五段制返回 {emoji, text}
+   - huajieQuotes：每日工作语录（花姐语录）
+   - getDailyQuote：按日期稳定索引，同日不变化、次日自动切换
+   - renderHomeGreeting：更新现有问候区元素（不重复插入 DOM）
+   ============================================================ */
+UI.__greetingTimer = null;
+
+/** 五段制问候：05-10 早上好 / 11-13 中午好 / 14-17 下午好 / 18-21 晚上好 / 22-04 夜深了 */
+UI.getGreetingByTime = (date) => {
+  const d = (date === undefined || date === null) ? new Date() : date;
+  if (!(d instanceof Date) || isNaN(d.getTime())) return { emoji: '✨', text: '你好' }; // 非法输入兜底
+  const hour = d.getHours();
+  if (hour >= 5 && hour < 11) return { emoji: '🌤️', text: '早上好' };
+  if (hour >= 11 && hour < 14) return { emoji: '☀️', text: '中午好' };
+  if (hour >= 14 && hour < 18) return { emoji: '🌞', text: '下午好' };
+  if (hour >= 18 && hour < 22) return { emoji: '🌆', text: '晚上好' };
+  return { emoji: '🌙', text: '夜深了' };
+};
+
+/** 每日工作语录（15 条） */
+UI.huajieQuotes = [
+  '今天的重点不在多，在于闭环。',
+  '先处理最要紧的那一件，其他自然顺起来。',
+  '每一步留痕，回头复盘才有据可依。',
+  '重要的事早点做完，心里才踏实。',
+  '不急不躁，把眼前这一件事做好。',
+  '有问题及时上报，别让小事变成大事。',
+  '今日事今日毕，明日才有从容。',
+  '多问一句，胜过事后补救。',
+  '把节奏稳住，事情自然会向前走。',
+  '记录是最好的提醒，别让细节溜走。',
+  '对账、巡检、跟进，一件都不能少。',
+  '稳稳推进，胜过仓促完成。',
+  '做完一件事，就给它画个句号。',
+  '今日复盘十分钟，明天少踩一个坑。',
+  '今天也要把重要的事情稳稳闭环。',
+];
+
+/** 按日期稳定取语录：dateKey = YYYYMMDD，取模索引 → 同日稳定、次日自动切换 */
+UI.getDailyQuote = (date) => {
+  const d = (date === undefined || date === null) ? new Date() : date;
+  if (!(d instanceof Date) || isNaN(d.getTime())) return '今天也要把重要的事情稳稳闭环。';
+  if (!UI.huajieQuotes || !UI.huajieQuotes.length) return '今天也要把重要的事情稳稳闭环。';
+  const dateKey = d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+  return UI.huajieQuotes[dateKey % UI.huajieQuotes.length];
+};
+
+/** 更新首页问候区现有元素（emoji / 文案+花姐 / ｜ / 每日语录），仅在内容变化时写入 DOM */
+UI.renderHomeGreeting = (date) => {
+  const g = UI.getGreetingByTime(date);
+  const emoji = (typeof g.emoji === 'string' && g.emoji.trim()) ? g.emoji.trim() : '✨';
+  const text = ((typeof g.text === 'string' && g.text.trim()) ? g.text.trim() : '你好') + '，花姐';
+  const quote = UI.getDailyQuote(date);
+  const emojiEl = document.getElementById('homeGreetingEmoji');
+  const textEl = document.getElementById('homeGreetingText');
+  const quoteEl = document.getElementById('homeDailyQuote');
+  if (emojiEl && emojiEl.textContent !== emoji) emojiEl.textContent = emoji;
+  if (textEl && textEl.textContent !== text) textEl.textContent = text;
+  if (quoteEl && quoteEl.textContent !== quote) quoteEl.textContent = quote;
+  return { emoji, text, quote };
+};
+
+/* ============================================================
    今日指挥台 v2 — 四区域结构
    ============================================================ */
 UI.renderHome = () => {
   const el = document.getElementById('view-home');
-  const now = new Date();
-  const h = now.getHours();
 
-  // ── 区域1：轻量问候区（带助手头像）─────────────────────────────
-  const hourMap = [
-    ['0','快收工了'],['5','快收工了'],['6','早上好'],['7','早上好'],['8','早上好'],['9','早上好'],
-    ['10','上午好'],['11','上午好'],['12','中午好'],['13','中午好'],['14','下午好'],['15','下午好'],
-    ['16','下午好'],['17','下午好'],['18','傍晚好'],['19','傍晚好']
-  ];
-  const greeting = (hourMap.find(([k]) => h <= parseInt(k)) || ['晚上好'])[1];
-  const greetingEmoji = h < 9 ? '☀️' : h < 12 ? '🌤️' : h < 14 ? '☀️' : h < 17 ? '🌤️' : h < 19 ? '🌅' : '🌙';
+  // ── 区域1：轻量问候区（带助手头像；问候与语录由 UI.renderHomeGreeting 填充）──
   const today = NK.today();
 
   const rem = NK.genReminders();
@@ -518,7 +574,11 @@ UI.renderHome = () => {
     <div class="dash-zone dash-greet">
       <div class="dg-avatar">💼</div>
       <div class="dg-text">
-        <div class="dg-hello"><span class="dg-emoji">${greetingEmoji}</span>${greeting}，花姐</div>
+        <div class="dg-hello home-greeting-line">
+          <span class="home-greeting-main"><span id="homeGreetingEmoji" class="dg-emoji"></span><span id="homeGreetingText" class="home-greeting-text"></span></span>
+          <span id="homeGreetingDivider" class="home-greeting-divider" aria-hidden="true">｜</span>
+          <span id="homeDailyQuote" class="home-daily-quote"></span>
+        </div>
         <div class="dg-status">
           <span class="dg-dot">●</span> ${NK.esc(statusText)}
           <span style="color:var(--text-3)">·</span>
@@ -544,6 +604,13 @@ UI.renderHome = () => {
       ${tlHTML}
     </div>
   `;
+  // 填充问候与每日语录（新 DOM 必然写入；随后定时器每分钟检查，仅跨时段/跨日变化时更新）
+  UI.renderHomeGreeting();
+  if (UI.__greetingTimer) clearInterval(UI.__greetingTimer);
+  UI.__greetingTimer = setInterval(() => {
+    if (NK.currentView !== 'home') { clearInterval(UI.__greetingTimer); UI.__greetingTimer = null; return; }
+    UI.renderHomeGreeting();
+  }, 60000);
 };
 
 /** 首页时间轴 · HP耗材每日邮件检查：标记今日已完成 / 撤销完成

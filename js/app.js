@@ -126,7 +126,11 @@ NK.initDB = () => {
     quickNotes: [],
     nextSeq: { dispatch: 1, task: 1, project: 1, kpi: 1 },
     createdAt: NK.now(),
+    // 实时告警清空状态（一键清空）：只标记告警提示，绝不删除业务数据
+    alertState: { cooldownHours: 2, cleared: {}, records: [] },
   };
+  // 兼容旧存档：补齐 alertState 字段
+  NK.db.alertState = NK.db.alertState || { cooldownHours: 2, cleared: {}, records: [] };
   NK.seedDemoData();
   NK.save();
 };
@@ -651,7 +655,121 @@ NK.genReminders = () => {
       }
     }
   });
-  return list;
+
+  /* ── 告警来源标识（用于一键清空 + 冷却去重）──────────── */
+  list.forEach(r => {
+    const a = (r.actions || [])[0];
+    const typeMap = { task: 'task', dispatch: 'dispatch', project: 'project' };
+    r.sourceType = a && typeMap[a.act] ? typeMap[a.act] : (a && a.act || 'other');
+    r.sourceId = (a && a.arg) || r.id;
+    // 稳定告警键：同一来源 + 同一告警类型 = 一条实例
+    r.alertKey = r.id.replace(/^R-/, '');
+  });
+
+  /* ── 一键清空后的冷却抑制（清空的是提示，不是解决问题）──────────── */
+  // 清空后 cooldownHours 小时内，同一来源同一原因不立即重复出现；
+  // 冷却期结束或出现新的状态变化后，重新满足条件仍会重新告警。
+  const cleared = NK.db.alertState && NK.db.alertState.cleared || {};
+  const nowMs = Date.now();
+  let expired = false;
+  const filtered = list.filter(r => {
+    const c = cleared[r.alertKey];
+    if (!c) return true;                       // 从未清空
+    if (c.solved) return true;                 // 已解决（重新触发）
+    if (c.cooldownUntil && nowMs < c.cooldownUntil) return false; // 冷却期内
+    // 冷却期已过：允许重新告警，同时生成一条新的告警实例（保留历史清空记录）
+    delete cleared[r.alertKey];
+    expired = true;
+    return true;
+  });
+  if (expired) NK.save(); // 仅当清除了冷却期到期的标记时才持久化
+
+  return filtered;
+};
+
+/* ============================================================
+   实时告警 · 一键清空
+   核心原则：清空的是当前告警提示，不是删除工作记录。
+   ============================================================ */
+/**
+ * 获取实时告警完整清单（已应用冷却抑制）。含来源与告警键。
+ */
+NK.alerts = () => NK.genReminders();
+
+/**
+ * 一键清空当前告警。
+ * scope: 'all' 全部清空 | 'warn' 只清空普通提醒，保留危险告警
+ * 返回 { cleared: 本次清空实例数组, record: 清空记录, keptDanger: 保留危险数 }
+ * 严格：不删除/不改动任务、派单、专项、KPI 任何业务数据。
+ */
+NK.clearAlerts = (scope) => {
+  scope = scope || 'all';
+  const list = NK.genReminders();
+  const clearable = list.filter(r => scope === 'all' || r.level !== 'danger');
+  const keptDanger = list.filter(r => r.level === 'danger' && scope !== 'all').length;
+
+  const state = NK.db.alertState = NK.db.alertState || { cooldownHours: 2, cleared: {}, records: [] };
+  const cooldownHours = (state.cooldownHours != null) ? state.cooldownHours : 2;
+  const cooldownUntil = Date.now() + cooldownHours * 3600000;
+  const batchId = NK.uid('CLR');
+  const nowIso = NK.now();
+
+  // 每条可清空告警标记为已清空（冷却期内不重复出现）
+  clearable.forEach(r => {
+    state.cleared[r.alertKey] = {
+      alertKey: r.alertKey,
+      sourceType: r.sourceType,
+      sourceId: r.sourceId,
+      alertLevel: r.level,
+      alertReason: r.title,
+      alertContent: r.content,
+      createdAt: nowIso,
+      clearedAt: nowIso,
+      clearedBy: '花姐',
+      clearBatchId: batchId,
+      clearStatus: 'cleared',
+      cooldownUntil,
+    };
+  });
+
+  // 生成清空记录（历史留痕）
+  const record = {
+    batchId,
+    clearedAt: nowIso,
+    clearedBy: '花姐',
+    scope,
+    total: clearable.length,
+    danger: clearable.filter(r => r.level === 'danger').length,
+    warn: clearable.filter(r => r.level !== 'danger').length,
+    keptDanger,
+    cooldownHours,
+    alerts: clearable.map(r => ({
+      alertKey: r.alertKey, sourceType: r.sourceType, sourceId: r.sourceId,
+      level: r.level, reason: r.title, content: r.content,
+    })),
+  };
+  state.records.push(record);
+  NK.save();
+  return { cleared: clearable, record, keptDanger };
+};
+
+/**
+ * 冷却期后告警重新出现时，允许清空状态解除并重新触发。
+ * 当原始事项已解决（任务完成/派单闭环/专项完成）时调用，标记告警已解决。
+ */
+NK.resolveAlert = (alertKey) => {
+  const state = NK.db.alertState = NK.db.alertState || { cooldownHours: 2, cleared: {}, records: [] };
+  const c = state.cleared[alertKey];
+  if (c) { c.solved = true; c.resolvedAt = NK.now(); c.clearStatus = 'solved'; }
+  NK.save();
+};
+
+/**
+ * 读取清空记录（按时间倒序）。
+ */
+NK.alertRecords = () => {
+  const state = NK.db.alertState = NK.db.alertState || { cooldownHours: 2, cleared: {}, records: [] };
+  return state.records.slice().reverse();
 };
 
 /* ============================================================

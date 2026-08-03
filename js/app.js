@@ -142,6 +142,7 @@ NK.initDB = () => {
   if (baseMatch) {
     NK.db = saved;
     NK.db.quickNotes = NK.db.quickNotes || [];
+    NK.db.assistantOps = NK.db.assistantOps || [];
     NK.mode = saved.mode === 'demo' ? 'demo' : 'work';
     NK.migrateFixedTasks();   // 固定任务升级 + 清理旧演示/预置数据（幂等）
     NK.ensureFixedTasks();    // 生成今日/本月应出现的固定任务实例
@@ -164,7 +165,7 @@ NK.initDB = () => {
     // 运行时数据
     tasks: [], dispatches: [], projects: [], projectTasks: [],
     taskUpdates: [], kpiEvents: [], customerRatings: [], reminders: [], handovers: [],
-    quickNotes: [], leaves: [],
+    quickNotes: [], leaves: [], assistantOps: [],
     nextSeq: { dispatch: 1, task: 1, project: 1, kpi: 1 },
     createdAt: NK.now(),
     // 实时告警清空状态（一键清空）：只标记告警提示，绝不删除业务数据

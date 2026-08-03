@@ -1048,3 +1048,37 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .lr-d-item { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--panel); }
 .lr-d-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13.5px; }
 .lr-d-sub { font-size: 11.5px; color: var(--text-2); margin-top: 5px; line-height: 1.6; }
+
+/* ============================================================
+   花姐助手 · 操作助手样式
+   ============================================================ */
+.ap-msg.bot,
+.ap-msg.her { background: #f0f3f7; align-self: flex-start; border-bottom-left-radius: 3px; }
+.ap-msg .ap-text { white-space: pre-wrap; }
+.ap-loading { color: var(--text-2); font-style: italic; }
+
+/* 结果卡片操作按钮 */
+.am-actions { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+.am-btn {
+  border: 1px solid var(--border);
+  background: #fff; color: var(--text-1);
+  border-radius: 14px; padding: 5px 12px; font-size: 12px; cursor: pointer;
+  transition: all .15s ease;
+}
+.am-btn:hover { border-color: var(--primary); color: var(--primary); background: rgba(99,102,241,.06); }
+
+/* 快捷指令区 */
+.ap-quick { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; align-self: flex-start; max-width: 88%; }
+.ap-quick-btn {
+  text-align: left; border: 1px dashed var(--border); background: transparent;
+  color: var(--text-2); border-radius: 8px; padding: 7px 12px; font-size: 12px; cursor: pointer;
+  transition: all .15s ease;
+}
+.ap-quick-btn:hover { border-color: var(--accent); color: var(--primary); background: rgba(99,102,241,.04); }
+
+/* 操作记录面板 */
+.al-list { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow: auto; }
+.al-row { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--panel); }
+.al-line { display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap; }
+.al-sub { font-size: 11.5px; color: var(--text-2); margin-top: 4px; }
+.al-raw { font-size: 11px; color: var(--text-3); margin-top: 4px; font-style: italic; }

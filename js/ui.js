@@ -4102,41 +4102,182 @@ UI.renderAbout = () => {
 };
 
 /* ============================================================
-   花姐助手面板
+   花姐助手面板（操作助手）
+   ------------------------------------------------------------
+   支持：结果卡片 / 操作按钮（查看、撤销、确认）/ 加载提示 /
+   欢迎语与快捷指令 / 当前会话上下文（"它/补一句"）/
+   操作日志面板入口
    ============================================================ */
 UI.bindAssistant = () => {
   const panel = document.getElementById('assistantPanel');
   const body = document.getElementById('apBody');
   const input = document.getElementById('apInput');
-  const push = (who, text) => {
+  // 当前会话上下文（供"它/补一句"引用最近意图）
+  const ctx = { lastIntent: null };
+  // 快捷指令
+  const quickCmds = [
+    '今天有什么待办？', '新增任务，明天下午确认南京网络问题', '今日日常任务全部完成',
+    '今天谁休假？', '创建派单，湖州打印机无法打印', '生成今日交接',
+  ];
+
+  /** 执行 act 动作（供结果卡片按钮回调） */
+  const runAct = (act, arg) => {
+    try {
+      if (!act) return;
+      if (act === 'nav') { UI.nav(arg); return; }
+      if (act === 'taskDetail') { UI.taskDetail(arg); return; }
+      if (act === 'projectDetail') { UI.projectDetail(arg); return; }
+      if (act === 'dispatchDetail') { UI.dispatchDetail(arg); return; }
+      if (act === 'assistantUndo') {
+        const res = NK.assistant.undo(arg);
+        pushBot({ text: res.msg });
+        return;
+      }
+      if (act === 'assistantCompletePick') {
+        pushBot(NK.assistant.completePick(arg)[0]); return;
+      }
+      if (act === 'assistantUpdatePick') {
+        const parts = String(arg).split('__SUB__');
+        const id = parts[0];
+        const sub = parts.length > 1 ? decodeURIComponent(parts[1]) : '';
+        pushBot(NK.assistant.updatePick(id, sub)[0]); return;
+      }
+      if (act === 'assistantConfirmDailyAll') {
+        pushBot(NK.assistant.confirmDailyAll(arg)[0]); return;
+      }
+      if (act === 'assistantConfirmClearAlerts') {
+        pushBot(NK.assistant.confirmClearAlerts()[0]); return;
+      }
+      if (act === 'assistantConfirmIntent') {
+        pushBot(NK.assistant.confirmIntent(arg)[0]); return;
+      }
+      if (act === 'assistantNoop') { return; }
+      if (act === 'assistantShowLogs') {
+        UI.assistantLogs();
+        return;
+      }
+      // 其他 JS 表达式
+      // eslint-disable-next-line no-eval
+      eval(act);
+    } catch (e) {
+      UI.toast('花姐，这个操作暂时没成功，请重试～', 'warn');
+    }
+  };
+
+  /** 推送一条消息（支持纯文本或 {text, actions} 结构） */
+  const push = (who, content) => {
     const d = document.createElement('div');
-    d.className = 'ap-msg ' + (who === 'me' ? 'me' : 'bot');
-    d.textContent = text;
+    d.className = 'ap-msg ' + (who === 'me' ? 'me' : 'her');
+    if (typeof content === 'string') {
+      d.textContent = content;
+    } else {
+      const textDiv = document.createElement('div');
+      textDiv.className = 'ap-text';
+      textDiv.textContent = content.text || '';
+      d.appendChild(textDiv);
+      if (content.actions && content.actions.length) {
+        const actWrap = document.createElement('div');
+        actWrap.className = 'am-actions';
+        content.actions.forEach(a => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'am-btn';
+          b.textContent = a.label;
+          b.onclick = () => runAct(a.act, a.arg);
+          actWrap.appendChild(b);
+        });
+        d.appendChild(actWrap);
+      }
+    }
     body.appendChild(d);
     body.scrollTop = body.scrollHeight;
+    return d;
   };
+
+  const pushBot = (content) => push('her', content);
+  const pushMe = (text) => push('me', text);
+
+  /** 发送处理 */
   const ask = () => {
     const q = input.value.trim();
     if (!q) return;
-    push('me', q);
+    pushMe(q);
     input.value = '';
-    const replies = NK.assistantReply(q);
-    setTimeout(() => replies.forEach(r => push('bot', r)), 150);
+    // 加载提示
+    const loading = document.createElement('div');
+    loading.className = 'ap-msg her ap-loading';
+    loading.textContent = '花姐助手正在理解你的意思…';
+    body.appendChild(loading);
+    body.scrollTop = body.scrollHeight;
+    setTimeout(() => {
+      try {
+        const replies = (NK.assistant && NK.assistant.handle) ? NK.assistant.handle(q, ctx) : NK.assistantReply(q);
+        loading.remove();
+        (Array.isArray(replies) ? replies : [{ text: replies }]).forEach(r => pushBot(r));
+      } catch (e) {
+        loading.remove();
+        pushBot({ text: '花姐，助手处理时出了点小问题，麻烦换个说法试试～' });
+      }
+    }, 180);
   };
+
+  /** 欢迎语 + 快捷指令 */
+  const welcome = () => {
+    pushBot('花姐你好呀 ✨\n你可以直接告诉我想查什么、记录什么或完成什么。');
+    const tips = document.createElement('div');
+    tips.className = 'ap-quick';
+    quickCmds.forEach(c => {
+      const q = document.createElement('button');
+      q.type = 'button';
+      q.className = 'ap-quick-btn';
+      q.textContent = c;
+      q.onclick = () => { input.value = c; ask(); };
+      tips.appendChild(q);
+    });
+    body.appendChild(tips);
+  };
+
   document.getElementById('assistantBtn').onclick = () => {
     panel.classList.toggle('hidden');
     if (!panel.classList.contains('hidden')) {
       input.focus();
-      if (!body.children.length) {
-        push('bot', '花姐你好呀 ✨ 我是你的运维助手，随时待命～');
-        push('bot', '可以这样问我：');
-        push('bot', '· 湖州谁负责？\n· 今天有什么超时？\n· 有哪些待办？\n· 本月KPI怎么样？\n· 怎么派单？');
-      }
+      if (!body.children.length) welcome();
     }
   };
   document.getElementById('apClose').onclick = () => panel.classList.add('hidden');
   document.getElementById('apSend').onclick = ask;
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') ask(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); ask(); }
+  });
+};
+
+/** 操作日志面板 */
+UI.assistantLogs = () => {
+  const logs = (NK.assistant && NK.assistant.logs) ? NK.assistant.logs() : [];
+  if (!logs.length) {
+    UI.toast('花姐，目前还没有助手操作记录～', 'ok');
+    return;
+  }
+  const rows = logs.map(l => `
+    <div class="al-row">
+      <div class="al-line"><span class="badge ${l.undone ? 'gray' : 'accent'}">${l.undone ? '已撤销' : '已执行'}</span>
+        <strong>${NK.esc(l.summary || l.action)}</strong></div>
+      <div class="al-sub">${NK.esc(l.targetModule || '')} · ${NK.fmtDT(new Date(l.time))}</div>
+      ${l.raw ? `<div class="al-raw">原话：${NK.esc(l.raw)}</div>` : ''}
+      ${!l.undone && l.snapshot ? `<button class="btn btn-sm" data-op="${NK.esc(l.operationId)}">撤销</button>` : ''}
+    </div>`).join('');
+  UI.modal('花姐助手 · 操作记录', `<div class="al-list">${rows}</div>`,
+    `<button class="btn" data-close>关闭</button>`,
+    { size: 'modal-md', onMount(root) {
+      root.querySelectorAll('[data-op]').forEach(b => {
+        b.onclick = () => {
+          const res = NK.assistant.undo(b.dataset.op);
+          UI.toast(res.msg, res.ok ? 'ok' : 'warn');
+          UI.modalClose();
+          UI.assistantLogs();
+        };
+      });
+    } });
 };
 
 /* ============================================================

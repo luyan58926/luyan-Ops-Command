@@ -391,19 +391,38 @@ UI.getDailyQuote = (date) => {
   return UI.huajieQuotes[dateKey % UI.huajieQuotes.length];
 };
 
-/** 更新首页问候区现有元素（emoji / 文案+花姐 / ｜ / 每日语录），仅在内容变化时写入 DOM */
+/** 本地日期+星期显示：YYYY年M月D日　星期X（月/日不补零，不含秒；非法输入返回空串）
+ *  仅读取浏览器本地时间，不依赖联网，不做时区偏移。 */
+UI.getLocalDateDisplay = (date) => {
+  const d = (date === undefined || date === null) ? new Date() : date;
+  if (!(d instanceof Date) || isNaN(d.getTime())) return '';
+  const weekdays = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日　${weekdays[d.getDay()]}`;
+};
+
+/** 更新首页问候区现有元素（emoji / 文案+花姐 / ｜ / 每日语录 / 当前日期·星期），仅在内容变化时写入 DOM。
+ *  问候、语录、日期共用同一个本地时间对象，避免跨天后不同步。 */
 UI.renderHomeGreeting = (date) => {
-  const g = UI.getGreetingByTime(date);
+  const now = (date === undefined || date === null) ? new Date() : date;
+  const g = UI.getGreetingByTime(now);
   const emoji = (typeof g.emoji === 'string' && g.emoji.trim()) ? g.emoji.trim() : '✨';
   const text = ((typeof g.text === 'string' && g.text.trim()) ? g.text.trim() : '你好') + '，花姐';
-  const quote = UI.getDailyQuote(date);
+  const quote = UI.getDailyQuote(now);
+  const dateText = UI.getLocalDateDisplay(now);
   const emojiEl = document.getElementById('homeGreetingEmoji');
   const textEl = document.getElementById('homeGreetingText');
   const quoteEl = document.getElementById('homeDailyQuote');
+  const dateEl = document.getElementById('homeCurrentDate');
   if (emojiEl && emojiEl.textContent !== emoji) emojiEl.textContent = emoji;
   if (textEl && textEl.textContent !== text) textEl.textContent = text;
   if (quoteEl && quoteEl.textContent !== quote) quoteEl.textContent = quote;
-  return { emoji, text, quote };
+  // 日期异常时暂时隐藏日期区域，不影响问候与首页其他内容
+  if (dateEl) {
+    const next = dateText || '';
+    if (dateEl.textContent !== next) dateEl.textContent = next;
+    dateEl.style.display = next ? '' : 'none';
+  }
+  return { emoji, text, quote, dateText };
 };
 
 /* ============================================================
@@ -655,10 +674,13 @@ UI.renderHome = () => {
     <div class="dash-zone dash-greet">
       <div class="dg-avatar">💼</div>
       <div class="dg-text">
-        <div class="dg-hello home-greeting-line">
-          <span class="home-greeting-main"><span id="homeGreetingEmoji" class="dg-emoji"></span><span id="homeGreetingText" class="home-greeting-text"></span></span>
-          <span id="homeGreetingDivider" class="home-greeting-divider" aria-hidden="true">｜</span>
-          <span id="homeDailyQuote" class="home-daily-quote"></span>
+        <div class="home-welcome-header">
+          <div class="dg-hello home-greeting-line">
+            <span class="home-greeting-main"><span id="homeGreetingEmoji" class="dg-emoji"></span><span id="homeGreetingText" class="home-greeting-text"></span></span>
+            <span id="homeGreetingDivider" class="home-greeting-divider" aria-hidden="true">｜</span>
+            <span id="homeDailyQuote" class="home-daily-quote"></span>
+          </div>
+          <div id="homeCurrentDate" class="home-current-date" aria-label="当前日期"></div>
         </div>
         <div class="dg-status">
           <span class="dg-dot">●</span> ${NK.esc(statusText)}

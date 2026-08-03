@@ -794,6 +794,22 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .home-greeting-divider { color: #C1BECE; font-size: 13px; font-weight: 400; }
 /* 每日语录（12px 灰紫） */
 .home-daily-quote { color: #727789; font-size: 12px; font-weight: 400; line-height: 1.6; }
+/* 欢迎区左右布局：问候+语录靠左，当前日期/星期靠右 */
+.home-welcome-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 20px; flex-wrap: wrap;
+}
+/* 当前日期与星期（辅助信息，视觉权重低于欢迎语；灰紫、不粗体、非胶囊） */
+.home-current-date {
+  flex-shrink: 0;
+  color: #73788a; font-size: 13px; font-weight: 400;
+  line-height: 1.5; white-space: nowrap;
+}
+/* 窄屏：欢迎语与日期可自然换行，日期落到下一行且保持完整、不溢出 */
+@media (max-width: 900px) {
+  .home-welcome-header { align-items: flex-start; }
+  .home-current-date { width: 100%; text-align: left; }
+}
 .dg-status { font-size: 12.5px; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
 .dg-status .dg-dot { color: var(--accent); }
 .dg-main-btn {

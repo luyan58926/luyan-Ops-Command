@@ -330,7 +330,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 }
 .filter-bar .fb-date {
   border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; background: #fff; outline: none;
-  width: 138px; color: var(--text); font-size: 12.5px;
+  width: 118px; color: var(--text); font-size: 12.5px;
 }
 .filter-bar .fb-date:focus { border-color: var(--accent); }
 .filter-bar .fb-clear {

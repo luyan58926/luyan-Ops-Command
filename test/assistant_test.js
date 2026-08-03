@@ -287,5 +287,38 @@ ok(pv[0].text.indexOf('撤销') !== -1, '已处理派单助手删除引导改为
 ok(pv[0].actions.some(a => a.act === 'assistantConfirmRevokeDispatch'), '提供改为撤销按钮');
 ok(run('NK.db.dispatches[0].recordStatus !== \'已删除\''), '已处理派单未被删除');
 
+console.log('== 十五、花姐助手「查看派单」日期范围查询（与派单中心数量一致） ==');
+// 准备一批带上门日期的派单
+run('NK.db.dispatches = []; NK.db.tasks = []; NK.save();');
+const dr1 = run(`(function(){ const d = NK.createDispatch({ title: '青岛打印机', siteName: '青岛中宏', city: '青岛', engineer: '李亚男', visitDate: '2026-08-05' }); return d.id; })()`);
+const dr2 = run(`(function(){ const d = NK.createDispatch({ title: '青岛网络', siteName: '青岛中宏', city: '青岛', engineer: '李亚男', visitDate: '2026-08-20' }); return d.id; })()`);
+const dr3 = run(`(function(){ const d = NK.createDispatch({ title: '湖州电力', siteName: '湖州中心', city: '湖州', engineer: '王彪', visitDate: '2026-09-10' }); return d.id; })()`);
+run('NK.db.dispatches[0].recordStatus = \'已删除\';'); // 第一条作废，验证默认排除已删除
+// 意图解析：本月/上月/区间/城市组合/单月+已发送
+let rd = parse('查看本月派单');
+ok(rd.intent === 'query' && rd.action === 'dispatch' && rd.startDate && rd.endDate, '「查看本月派单」→ 派单查询意图，含日期范围');
+let mS = run(`(() => { const x=new Date(); return NK.fmtDate(new Date(x.getFullYear(), x.getMonth(), 1)); })()`);
+let mE = run(`(() => { const x=new Date(); return NK.fmtDate(new Date(x.getFullYear(), x.getMonth()+1, 0)); })()`);
+ok(rd.startDate === mS && rd.endDate === mE, '「本月」解析为 ' + mS + ' 至 ' + mE);
+// 区间解析
+rd = parse('查看8月1日到8月31日的派单');
+ok(rd.action === 'dispatch' && rd.startDate === '2026-08-01' && rd.endDate === '2026-08-31', '「8月1日到8月31日」→ 2026-08-01 至 2026-08-31');
+// 执行查询：区间 8月 → 应返回 1 条（青岛网络 08-20；青岛打印机 已删除排除；湖州电力 09 月排除）
+let rq = run('NK.assistant.q_dispatch({ startDate: "2026-08-01", endDate: "2026-08-31", _rangeLabel: "2026-08-01至2026-08-31" })');
+ok(rq[0].text.indexOf('共 1 条派单') !== -1, '8月区间查询返回 1 条（默认排除已删除）');
+ok(rq[0].text.indexOf('青岛网络') !== -1 && rq[0].text.indexOf('青岛打印机') === -1, '区间结果含 08-20，不含已删除的 08-05');
+// 组合：本月 + 青岛 → 应返回青岛网络 1 条
+rq = run('NK.assistant.q_dispatch({ startDate: "' + mS + '", endDate: "' + mE + '", title: "青岛" })');
+ok(rq[0].text.indexOf('共 1 条派单') !== -1 && rq[0].text.indexOf('青岛网络') !== -1, '「本月+青岛」组合返回 1 条');
+// 无匹配
+rq = run('NK.assistant.q_dispatch({ startDate: "2026-09-10", endDate: "2026-09-10", title: "青岛" })');
+ok(rq[0].text.indexOf('没有找到派单记录') !== -1, '「9月10日+青岛」无匹配 → 提示未找到');
+// 未删除的历史未填写在无范围时显示
+const dr4 = run(`(function(){ const d = NK.createDispatch({ title: '未填写日期派单', siteName: '青岛中宏', city: '青岛' }); return d.id; })()`);
+rq = run('NK.assistant.q_dispatch({ startDate: "", endDate: "", title: "" })');
+ok(rq[0].text.indexOf('未填写日期派单') !== -1, '无日期范围时助手显示「未填写日期派单」');
+rq = run('NK.assistant.q_dispatch({ startDate: "2026-08-01", endDate: "2026-08-31" })');
+ok(rq[0].text.indexOf('未填写日期派单') === -1, '有日期范围时助手不含未填写派单');
+
 console.log('\n=== 结果: ' + pass + ' 通过, ' + fail + ' 失败 ===');
 process.exit(fail ? 1 : 0);

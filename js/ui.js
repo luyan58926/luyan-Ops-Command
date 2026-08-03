@@ -666,9 +666,9 @@ UI.renderDispatch = (filterArg) => {
   if (f.priority && f.priority !== '全部') list = list.filter(d => d.priority === f.priority);
   if (f.q) list = list.filter(d => `${d.no} ${d.title} ${d.city} ${d.engineer} ${d.contactName}`.includes(f.q));
   if (f.overdue) list = list.filter(d => d.planDone && d.planDone < today && d.status !== '已闭环' && d.status !== '已取消');
-  // 上门日期筛选：默认按上门日期(visitDate)查询
-  if (f.visitDate) list = list.filter(d => d.visitDate === f.visitDate);
-  if (f.visitNoDate) list = list.filter(d => !d.visitDate);
+  // 上门日期范围筛选：与花姐助手共享同一套逻辑（NK.filterByVisitRange），保证数量一致
+  list = NK.filterByVisitRange(list, f.visitStart, f.visitEnd);
+  const _vs = (f.visitStart || '').trim(), _ve = (f.visitEnd || '').trim();
 
   const statusOpts = ['全部', '已删除', ...NK.DISPATCH_STATUS, '已取消', '已暂停', '已撤销'];
   const priOpts = ['全部', 'P1', 'P2', 'P3'];
@@ -682,15 +682,32 @@ UI.renderDispatch = (filterArg) => {
     return d.visitDate;
   };
 
-  // 快捷日期范围：今天 / 明天 / 本周 / 全部
-  // 快捷日期范围：今天 / 明天 / 全部
-  const visitDateShortcuts = [
-    ['全部', ''],
-    ['今天', today],
-    ['明天', (() => { const x = new Date(); x.setDate(x.getDate() + 1); return NK.fmtDate(x); })()],
+  // 快捷日期范围：今天 / 本周 / 本月 / 上月（需正确处理跨年）
+  const _calc = UI._dispatchRangeCalc || (UI._dispatchRangeCalc = {});
+  const _weekStart = (() => {
+    const x = new Date(); const day = x.getDay(); x.setDate(x.getDate() - ((day + 6) % 7)); return NK.fmtDate(x);
+  })();
+  const _weekEnd = (() => {
+    const x = new Date(); const day = x.getDay(); x.setDate(x.getDate() - ((day + 6) % 7) + 6); return NK.fmtDate(x);
+  })();
+  const _nowY = new Date().getFullYear(), _nowM = new Date().getMonth();
+  const _monthStart = NK.fmtDate(new Date(_nowY, _nowM, 1));
+  const _monthEnd = NK.fmtDate(new Date(_nowY, _nowM + 1, 0));
+  const _lastY = _nowM === 0 ? _nowY - 1 : _nowY, _lastM = _nowM === 0 ? 11 : _nowM - 1;
+  const _lastStart = NK.fmtDate(new Date(_lastY, _lastM, 1));
+  const _lastEnd = NK.fmtDate(new Date(_lastY, _lastM + 1, 0));
+  const _rangeShortcuts = [
+    { label: '今天', start: today, end: today },
+    { label: '本周', start: _weekStart, end: _weekEnd },
+    { label: '本月', start: _monthStart, end: _monthEnd },
+    { label: '上月', start: _lastStart, end: _lastEnd },
   ];
-  const _shortcutHTML = visitDateShortcuts.map(([label, val]) =>
-    `<button class="fb-chip ${f.visitDate === val ? 'on' : ''}" data-vs="${val}" onclick="UI.setDispatchVisit('${val}')">${label}</button>`).join('');
+  const _rangeActive = (_vs && _ve && _vs === today && _ve === today) ? '今天'
+    : (_vs === _weekStart && _ve === _weekEnd) ? '本周'
+    : (_vs === _monthStart && _ve === _monthEnd) ? '本月'
+    : (_vs === _lastStart && _ve === _lastEnd) ? '上月' : '';
+  const _shortcutHTML = _rangeShortcuts.map(s =>
+    `<button class="fb-chip ${_rangeActive === s.label ? 'on' : ''}" data-vs="${s.start}" data-ve="${s.end}" onclick="UI.setDispatchRange('${s.label}')">${s.label}</button>`).join('');
 
   el.innerHTML = UI.pageHead('派单中心', '全国派单 · 任务闭环 · 一次录入多处复用',
     `<button class="btn btn-accent" onclick="UI.dispatchCreate()">⇶ 新建派单</button>`) +
@@ -698,13 +715,12 @@ UI.renderDispatch = (filterArg) => {
       <input class="fb-input" id="dpQ" placeholder="搜索编号/标题/城市/工程师…" value="${NK.esc(f.q || '')}">
       <select class="fb-select" id="dpStatus">${statusOpts.map(s => `<option ${(f.status || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
       <select class="fb-select" id="dpPri">${priOpts.map(s => `<option ${(f.priority || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
-      <input type="date" class="fb-date" id="dpVisitDate" value="${f.visitDate || ''}" title="按上门日期查询">
+      <span style="font-size:12px;color:var(--text-3);white-space:nowrap">上门日期</span>
+      <input type="date" class="fb-date" id="dpVisitStart" value="${_vs || ''}" title="上门日期-开始">
+      <span style="color:var(--text-3);font-size:12px">至</span>
+      <input type="date" class="fb-date" id="dpVisitEnd" value="${_ve || ''}" title="上门日期-结束">
       <span class="fb-chips">${_shortcutHTML}</span>
-      ${f.visitDate ? `<button class="fb-clear" id="dpVisitClear" title="清除日期">清除日期</button>` : ''}
-      <select class="fb-select" id="dpVisitNoDate" ${f.visitNoDate ? 'disabled' : ''}>
-        <option value="">全部日期</option>
-        <option value="1" ${f.visitNoDate ? 'selected' : ''}>上门日期未填写</option>
-      </select>
+      ${(_vs || _ve) ? `<button class="fb-clear" id="dpVisitClear" title="清除日期">清除日期</button>` : ''}
       <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="checkbox" id="dpOverdue" ${f.overdue ? 'checked' : ''}>只看超时</label>
       <span class="spacer"></span>
       <span style="font-size:12px;color:var(--text-3)">共 ${list.length} 条</span>
@@ -752,12 +768,19 @@ UI.renderDispatch = (filterArg) => {
 
   const bind = () => {
     const onFilter = () => {
+      const vs = document.getElementById('dpVisitStart').value;
+      const ve = document.getElementById('dpVisitEnd').value;
+      // 日期合法性校验：开始不能晚于结束（不静默交换、不清空数据）
+      if (vs && ve && vs > ve) {
+        UI.toast('开始日期不能晚于结束日期，请重新选择。', 'warn');
+        return;
+      }
       NK.dispatchFilter = {
         q: document.getElementById('dpQ').value,
         status: document.getElementById('dpStatus').value,
         priority: document.getElementById('dpPri').value,
-        visitDate: document.getElementById('dpVisitDate').value,
-        visitNoDate: document.getElementById('dpVisitNoDate').value === '1',
+        visitStart: vs,
+        visitEnd: ve,
         overdue: document.getElementById('dpOverdue').checked,
       };
       UI.renderDispatch();
@@ -765,13 +788,13 @@ UI.renderDispatch = (filterArg) => {
     document.getElementById('dpQ').addEventListener('input', NK.debounce ? NK.debounce(onFilter, 300) : onFilter);
     document.getElementById('dpStatus').onchange = onFilter;
     document.getElementById('dpPri').onchange = onFilter;
-    document.getElementById('dpVisitDate').onchange = onFilter;
-    document.getElementById('dpVisitNoDate').onchange = onFilter;
+    document.getElementById('dpVisitStart').onchange = onFilter;
+    document.getElementById('dpVisitEnd').onchange = onFilter;
     document.getElementById('dpOverdue').onchange = onFilter;
     const clearBtn = document.getElementById('dpVisitClear');
     if (clearBtn) clearBtn.onclick = () => {
-      document.getElementById('dpVisitDate').value = '';
-      document.getElementById('dpVisitNoDate').value = '';
+      document.getElementById('dpVisitStart').value = '';
+      document.getElementById('dpVisitEnd').value = '';
       onFilter();
     };
     // 更多菜单：点击展开/收起
@@ -794,11 +817,42 @@ UI.renderDispatch = (filterArg) => {
   setTimeout(bind, 0);
 };
 
-/** 派单中心：上门日期快捷筛选（今天/明天/全部） */
-UI.setDispatchVisit = (date) => {
+/** 派单中心：上门日期范围快捷筛选（今天/本周/本月/上月/清除） */
+UI.setDispatchRange = (label) => {
+  const today = NK.today();
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth();
+  const day = now.getDay();
+  let start = '', end = '';
+  if (label === '今天') { start = end = today; }
+  else if (label === '本周') {
+    const mon = new Date(now); mon.setDate(now.getDate() - ((day + 6) % 7));
+    const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+    start = NK.fmtDate(mon); end = NK.fmtDate(sun);
+  } else if (label === '本月') {
+    start = NK.fmtDate(new Date(y, m, 1)); end = NK.fmtDate(new Date(y, m + 1, 0));
+  } else if (label === '上月') {
+    const ly = m === 0 ? y - 1 : y, lm = m === 0 ? 11 : m - 1;
+    start = NK.fmtDate(new Date(ly, lm, 1)); end = NK.fmtDate(new Date(ly, lm + 1, 0));
+  } else {
+    // 清除日期
+    NK.dispatchFilter = NK.dispatchFilter || {};
+    delete NK.dispatchFilter.visitStart; delete NK.dispatchFilter.visitEnd;
+    UI.renderDispatch(); return;
+  }
   NK.dispatchFilter = NK.dispatchFilter || {};
-  NK.dispatchFilter.visitDate = date || '';
-  if (date) NK.dispatchFilter.visitNoDate = false;
+  NK.dispatchFilter.visitStart = start;
+  NK.dispatchFilter.visitEnd = end;
+  UI.renderDispatch();
+};
+
+/** 兼容旧调用：设置单日范围（开始=结束=date），date 为空则清除 */
+UI.setDispatchVisit = (date) => {
+  if (date) { NK.dispatchFilter = NK.dispatchFilter || {}; NK.dispatchFilter.visitStart = date; NK.dispatchFilter.visitEnd = date; }
+  else {
+    NK.dispatchFilter = NK.dispatchFilter || {};
+    delete NK.dispatchFilter.visitStart; delete NK.dispatchFilter.visitEnd;
+  }
   UI.renderDispatch();
 };
 

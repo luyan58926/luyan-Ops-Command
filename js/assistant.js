@@ -65,6 +65,46 @@
     return '全天';
   };
 
+  /**
+   * 解析派单日期范围查询（供"查看本月/上月/X月/X年X月/X月X日到X月X日派单"）。
+   * 返回 { start, end, label }；label 用于展示，start/end 为 YYYY-MM-DD 或 ''。
+   * 跨年正确处理（如 2027年1月点"上月" → 2026-12-01 至 2026-12-31）。
+   */
+  A.parseDispatchRange = (q) => {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const y = now.getFullYear(), m = now.getMonth(); // m: 0-11
+    // 本月
+    if (/本月|这个月/.test(q)) {
+      const s = NK.fmtDate(new Date(y, m, 1)), e = NK.fmtDate(new Date(y, m + 1, 0));
+      return { start: s, end: e, label: `本月（${y}年${m + 1}月）` };
+    }
+    // 上月
+    if (/上月|上个月/.test(q)) {
+      const ly = m === 0 ? y - 1 : y, lm = m === 0 ? 11 : m - 1;
+      const s = NK.fmtDate(new Date(ly, lm, 1)), e = NK.fmtDate(new Date(ly, lm + 1, 0));
+      return { start: s, end: e, label: `上月（${ly}年${lm + 1}月）` };
+    }
+    // YYYY年M月
+    const ym = q.match(/(\d{4})年(\d{1,2})月/);
+    if (ym) {
+      const yy = parseInt(ym[1], 10), mm = parseInt(ym[2], 10) - 1;
+      const s = NK.fmtDate(new Date(yy, mm, 1)), e = NK.fmtDate(new Date(yy, mm + 1, 0));
+      return { start: s, end: e, label: `${yy}年${mm + 1}月` };
+    }
+    // "X月1日到X月X日" / "8月1日到8月31日"（同一年内）
+    const rng = q.match(/(\d{1,2})月(\d{1,2})[日号].*?(\d{1,2})月(\d{1,2})[日号]/);
+    if (rng) {
+      const ms = parseInt(rng[1], 10), ds = parseInt(rng[2], 10), me = parseInt(rng[3], 10), de = parseInt(rng[4], 10);
+      const s = NK.fmtDate(new Date(y, ms - 1, ds)), e = NK.fmtDate(new Date(y, me - 1, de));
+      return { start: s, end: e, label: `${s} 至 ${e}` };
+    }
+    // 单日期（"X月X日" / "今天" / "明天" / "YYYY-MM-DD"）→ 单日
+    const single = A.normDate(q);
+    if (single) return { start: single, end: single, label: single };
+    return null;
+  };
+
   /** 匹配工程师姓名（支持姓名中包含的别名） */
   A.matchEngineer = (text) => {
     if (!text) return null;
@@ -274,6 +314,33 @@
     }
     if (/今天.*情况|今日概览|今天怎么样|总体情况/.test(q)) {
       return Object.assign(intent, { intent: 'query', action: 'overview', targetModule: 'home', confidence: 0.85 });
+    }
+    /* —— 查看派单（支持日期范围/关键词/状态组合；与派单中心共用 NK.filterByVisitRange） —— */
+    const viewDispatchM = q.match(/(?:查看|查询|找|给我看|帮我查|有几条|多少条|看看).*派单|派单.*(?:查看|查询|有哪几条|有哪些|列表|多少)/);
+    if (/派单/.test(q) && viewDispatchM && !/撤销|删除|创建|新建|催办|登记|补位/.test(q)) {
+      const range = A.parseDispatchRange(q);
+      // 关键词（城市/职场）
+      let kw = '';
+      const kwCandidates = ['青岛', '湖州', '威海', '上海', '苏州', '济南', '烟台', '北京', '南京', '天津', '合肥', '广州', '深圳'];
+      const kwhit = kwCandidates.find(c => q.indexOf(c) !== -1);
+      if (kwhit) kw = kwhit;
+      else {
+        // 从"的派单"前缀提取（如"本月青岛的派单"→"青岛"）
+        const pref = (q.match(/(.+?)的?派单/) || [])[1];
+        if (pref) {
+          const cleaned = (pref || '').replace(/查看|查询|找|给我看|帮我查|本月|上月|这个月|上个月|(\d{4}年)?\d{1,2}月|今天|明天|昨天|\d{1,2}月\d{1,2}日?号?|到|至|及|和|所有|全部/g, '').replace(/[，,。、\s]/g, '').trim();
+          if (cleaned) kw = cleaned;
+        }
+      }
+      // 状态关键词
+      let status = '';
+      const stM = (q.match(/已发送|待花姐验收|已生成|已验收|已闭环|已撤销|已取消|已暂停|待工程师确认|已确认/) || [])[0];
+      if (stM) status = stM;
+      return Object.assign(intent, {
+        intent: 'query', action: 'dispatch', targetModule: 'dispatch',
+        startDate: range ? range.start : '', endDate: range ? range.end : '',
+        title: kw, status, confidence: 0.88, _rangeLabel: range ? range.label : '',
+      });
     }
 
     /* —— 清空告警（高风险，需确认） —— */
@@ -603,6 +670,35 @@
     return [{
       text: `花姐，今天共 ${rem.length} 项提醒：P1/超时 ${urgent.length} 项、待发送 ${disps.filter(d => d.status === '已生成').length} 项、待验收 ${disps.filter(d => d.status === '待花姐验收').length} 项。${urgent.length ? '\n优先级最高：' + urgent.slice(0, 3).map(u => u.title).join('；') : '\n今天没有超时事项 ✨'}`,
       actions: urgent.length ? [{ label: '查看实时告警', act: 'nav', arg: 'tasks' }] : undefined,
+    }];
+  };
+
+  /** 查询：派单列表（按日期范围/关键词/状态；与派单中心共用 NK.filterByVisitRange，数量一致） */
+  A.q_dispatch = (intent) => {
+    const vs = intent.startDate || '', ve = intent.endDate || '';
+    const kw = intent.title || '';
+    const status = intent.status || '';
+    const label = intent._rangeLabel || (vs && ve && vs === ve ? vs : (vs || ve) ? (vs || '…') + '至' + (ve || '…') : '全部');
+    let list = NK.db.dispatches || [];
+    // 默认排除已删除
+    list = list.filter(d => d.recordStatus !== '已删除');
+    // 日期范围（共享逻辑）
+    list = NK.filterByVisitRange(list, vs, ve);
+    // 关键词（编号/标题/职场/城市/工程师）
+    if (kw) {
+      list = list.filter(d => `${d.no || ''} ${d.title || ''} ${d.siteName || ''} ${d.city || ''} ${d.engineer || ''}`.indexOf(kw) !== -1);
+    }
+    // 状态
+    if (status) list = list.filter(d => d.status === status);
+    if (!list.length) {
+      return [{ text: `花姐，${label}${kw ? '「' + kw + '」' : ''}${status ? '（' + status + '）' : ''}没有找到派单记录～` }];
+    }
+    const head = `${label}${kw ? ' · ' + kw : ''}${status ? ' · ' + status : ''}共 ${list.length} 条派单：`;
+    const lines = list.slice(0, 12).map(d => `• ${d.no}｜${d.title}｜${d.siteName || d.city || '—'}｜${d.engineer || '—'}｜${d.visitDate || '未填写'}｜${d.status}`).join('\n');
+    const more = list.length > 12 ? `\n……等共 ${list.length} 条` : '';
+    return [{
+      text: head + '\n' + lines + more,
+      actions: [{ label: '前往派单中心查看', act: 'nav', arg: 'dispatch' }],
     }];
   };
 
@@ -1054,6 +1150,7 @@
       project_progress: () => A.q_project_progress(),
       notes: () => A.q_notes(),
       overview: () => A.q_overview(),
+      dispatch: () => A.q_dispatch(intent),
     };
     if (intent.intent === 'query' && queryMap[intent.action]) {
       return queryMap[intent.action]();

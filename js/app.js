@@ -532,6 +532,26 @@ NK.setVisitDate = (id, date) => {
   return d;
 };
 
+/**
+ * 共享的上门日期范围过滤：派单中心与花姐助手必须使用同一套逻辑，保证数量一致。
+ * 规则：开始≤上门日期≤结束；只填开始→该日及以后；只填结束→该日及以前；两端相同→单日；均为空→全部。
+ * 设置了任何日期条件后，未填写上门日期的派单不进入结果。
+ * @param {Array} list 派单数组
+ * @param {string} start 开始日期 YYYY-MM-DD 或 ''
+ * @param {string} end 结束日期 YYYY-MM-DD 或 ''
+ * @returns {Array} 过滤后的派单
+ */
+NK.filterByVisitRange = (list, start, end) => {
+  const vs = (start || '').trim(), ve = (end || '').trim();
+  if (!vs && !ve) return list;
+  return list.filter(d => {
+    if (!d.visitDate) return false;
+    if (vs && d.visitDate < vs) return false;
+    if (ve && d.visitDate > ve) return false;
+    return true;
+  });
+};
+
 /** 渲染派单消息 */
 NK.renderDispatchMsg = (d) => {
   const tpl = NK.activeTpl();

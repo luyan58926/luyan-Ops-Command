@@ -206,7 +206,7 @@ ok(countTimers(300000) === 1, '原有 5 分钟全局刷新定时器不受影响'
 console.log('== CSS 单行排版 ==');
 const cssSrc = fs.readFileSync(path.join(ROOT, 'css', 'app.css'), 'utf8');
 ok(cssSrc.includes('.home-greeting-main'), 'CSS 定义 .home-greeting-main');
-ok(/\.home-greeting-main\s*\{[^}]*24px[^}]*600/.test(cssSrc), '问候语 24px/600');
+ok(/\.home-greeting-main\s*\{[^}]*18px[^}]*600/.test(cssSrc), '问候语 18px/600');
 ok(/\.home-greeting-main\s*\{[^}]*#2F3443/.test(cssSrc), '问候语深灰蓝 #2F3443');
 ok(cssSrc.includes('.home-greeting-divider'), 'CSS 定义 .home-greeting-divider');
 ok(cssSrc.includes('.home-daily-quote'), 'CSS 定义 .home-daily-quote');

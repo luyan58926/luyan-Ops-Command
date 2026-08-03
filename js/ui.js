@@ -600,8 +600,9 @@ UI.renderHome = () => {
         sort: (t.createdAt || '23:59:59').slice(11, 16).replace(':', '') || '2359',
         time: (t.createdAt || '').slice(11, 16) || '今日',
         kind: 'task', name: t.name,
-        note: t.type + (t.siteName ? ' · ' + NK.v.siteName(t.siteName) : '') + (t.engineer ? ' · ' + NK.v.engName(t.engineer) : ''),
+        note: t.type + (t.siteName ? ' · ' + NK.v.siteName(t.siteName) : '') + (NK.taskIsMulti(t) ? (NK.taskAssigneeLabel(t) ? ' · ' + NK.taskAssigneeLabel(t) : '') : (t.engineer ? ' · ' + NK.v.engName(t.engineer) : '')),
         pri: t.priority, done: t.status === '已完成', status: t.status, taskId: t.id,
+        prog: NK.taskIsMulti(t) ? NK.taskProgressLabel(t) : '',
       });
     });
   // 3) 今日新建的专项
@@ -667,6 +668,7 @@ UI.renderHome = () => {
           ${onsiteDate}
           ${priBadge}
           ${t.sub ? `<div class="tl-note">${t.sub}</div>` : ''}
+          ${t.prog ? `<span class="tl-prog">${NK.esc(t.prog)}</span>` : ''}
           ${cmplBtn}
         </div>`;
       }).join('')}</div>` : '<div class="fc-empty"><div class="fc-empty-icon">📅</div><div class="fc-empty-text">今天还没有任务和定时事项<br>有安排随时记进来 ✨</div></div>'}
@@ -2205,7 +2207,7 @@ UI.renderTasks = () => {
     if (f.source === '已完成') list = list.filter(t => t.status === '已完成');
     else list = list.filter(t => NK.taskSourceKey(t) === f.source);
   }
-  if (f.q) list = list.filter(t => `${t.no} ${t.name} ${t.siteName} ${t.engineer}`.includes(f.q));
+  if (f.q) list = list.filter(t => `${t.no} ${t.name} ${t.siteName} ${t.engineer} ${NK.taskAssigneeNames(t).join(' ')}`.includes(f.q));
   if (f.overdue) list = list.filter(t => t.dueDate && t.dueDate < today && t.status !== '已完成');
 
   // 告警清单
@@ -2287,7 +2289,7 @@ UI.renderTasks = () => {
           <td><span class="tag">${NK.esc(t.type)}</span></td>
           <td>${UI.priBadge(t.priority)}</td>
           <td>${NK.esc(v.siteName || '—')}</td>
-          <td>${NK.esc(v.engineer || '—')}</td>
+          <td>${NK.taskIsMulti(t) ? NK.esc(NK.taskAssigneeLabel(t)) || '—' : NK.esc(v.engineer || '—')}</td>
           <td>${UI.statusBadge(t.status)}${isOv ? `<div style="font-size:10px;color:var(--warn)">已超时</div>` : ''}</td>
           <td>${t.dueDate ? t.dueDate + (t.dueTime ? ' ' + t.dueTime : '') : '—'}</td>
           <td>${(t.updatedAt || t.createdAt).slice(0, 16).replace('T', ' ')}</td>
@@ -2508,7 +2510,44 @@ UI.taskCreate = (updateMode) => {
    - 仅创建任务，不自动生成派单/消息/KPI
    ============================================================ */
 UI.taskQuickCreate = () => {
-  const engOpts = NK.db.engineers.map(e => `<option value="${NK.esc(e.name)}">${NK.esc(NK.v.engName(e.name))}${e.onsiteRegions.length ? '（驻场：' + NK.esc(e.onsiteRegions.join('/')) + '）' : ''}</option>`).join('');
+  // 多选工程师状态：使用工程师唯一ID保存 assigneeIds
+  const selIds = [];
+  const allEngs = NK.db.engineers.map(e => e.id);
+  // 渲染触发器内的标签区
+  const renderTrigger = (root) => {
+    const wrap = root.querySelector('#tqcEngWrap');
+    const selected = selIds.map(id => NK.engineerById(id)).filter(Boolean);
+    const allCount = allEngs.length;
+    let inner;
+    if (!selected.length) {
+      inner = `<span class="ms-placeholder">未指派</span>`;
+    } else if (selected.length === allCount) {
+      inner = `<span class="ms-tag">已选全部 ${allCount} 名</span>`;
+    } else {
+      inner = selected.map(e => `<span class="ms-tag">${NK.esc(NK.v.engName(e.name))}<span class="ms-tag-x" data-rm="${e.id}" title="移除">×</span></span>`).join('');
+    }
+    wrap.innerHTML = inner + `<span class="ms-caret">▾</span>`;
+    // 单个标签的×移除
+    wrap.querySelectorAll('[data-rm]').forEach(x => x.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const id = x.getAttribute('data-rm');
+      const i = selIds.indexOf(id); if (i >= 0) selIds.splice(i, 1);
+      const box = root.querySelector(`.ms-opt input[value="${id}"]`); if (box) box.checked = false;
+      renderTrigger(root); refreshPanelBar(root);
+    }));
+  };
+  // 刷新面板顶栏人数
+  const refreshPanelBar = (root) => {
+    const countEl = root.querySelector('#tqcMsCount');
+    if (countEl) countEl.textContent = `已选 ${selIds.length}/${allEngs.length} 名工程师`;
+  };
+  // 生成多选下拉面板（初态）
+  const engRows = NK.db.engineers.map(e => `
+    <label class="ms-opt">
+      <input type="checkbox" value="${e.id}" class="tqcMsOpt">
+      <span class="ms-opt-name">${NK.esc(NK.v.engName(e.name))}</span>
+      <span class="ms-opt-region">${e.onsiteRegions.length ? '驻场：' + NK.esc(e.onsiteRegions.join('/')) : ''}</span>
+    </label>`).join('');
   UI.modal('新增任务', `
     <div class="form-item"><label>任务名称 *</label><input id="tqcName" placeholder="客户事项，及时登记"></div>
     <div class="form-item"><label>任务类型</label>
@@ -2518,27 +2557,75 @@ UI.taskQuickCreate = () => {
       </select>
     </div>
     <div class="form-item"><label>截止日期</label><input id="tqcDue" type="date" value="${NK.today()}"></div>
-    <div class="form-item"><label>负责工程师（可选）</label><select id="tqcEng"><option value="">未指派</option>${engOpts}</select></div>
+    <div class="form-item"><label>负责工程师（可多选，点击整行勾选）</label>
+      <div class="ms-trigger" id="tqcEngTrigger" role="button" tabindex="0"><div id="tqcEngWrap"></div></div>
+      <div class="ms-panel hidden" id="tqcMsPanel">
+        <div class="ms-panel-bar">
+          <span class="ms-count" id="tqcMsCount">已选 0/${allEngs.length} 名工程师</span>
+          <span class="ms-bar-btns">
+            <button type="button" class="ms-bar-btn" id="tqcMsAll">全选 ${allEngs.length} 人</button>
+            <button type="button" class="ms-bar-btn" id="tqcMsClear">清空</button>
+          </span>
+        </div>
+        <div class="ms-panel-list">${engRows}</div>
+      </div>
+    </div>
     <div class="form-item"><label>备注（可选）</label><textarea id="tqcNote" placeholder="任务要求、下一步等，可留空"></textarea></div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="tqcOk">创建任务</button>`, {
     editable: true,
-    onMount(root) {
+    onMount(root, layer) {
+      const trigger = root.querySelector('#tqcEngTrigger');
+      const panel = root.querySelector('#tqcMsPanel');
+      const renderSel = () => { renderTrigger(root); refreshPanelBar(root); };
+      renderSel();
+      // 点击整行勾选（label内点击即切换，不额外处理）
+      // 面板开合
+      const openPanel = () => { panel.classList.remove('hidden'); trigger.classList.add('ms-open'); };
+      const closePanel = () => { panel.classList.add('hidden'); trigger.classList.remove('ms-open'); };
+      trigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (panel.classList.contains('hidden')) openPanel(); else closePanel();
+      });
+      // 复选框变更：同步 selIds
+      panel.addEventListener('change', (e) => {
+        const cb = e.target;
+        if (!cb.classList.contains('tqcMsOpt')) return;
+        const id = cb.value;
+        const i = selIds.indexOf(id);
+        if (cb.checked && i < 0) selIds.push(id);
+        if (!cb.checked && i >= 0) selIds.splice(i, 1);
+        renderSel();
+      });
+      // 全选 / 清空
+      root.querySelector('#tqcMsAll').addEventListener('click', (e) => { e.stopPropagation(); selIds.length = 0; selIds.push(...allEngs); panel.querySelectorAll('.tqcMsOpt').forEach(c => c.checked = true); renderSel(); });
+      root.querySelector('#tqcMsClear').addEventListener('click', (e) => { e.stopPropagation(); selIds.length = 0; panel.querySelectorAll('.tqcMsOpt').forEach(c => c.checked = false); renderSel(); });
+      // 外部点击关闭：弹窗内点击不关闭（modal层已stopPropagation，这里针对本面板外）
+      layer.querySelector('.modal').addEventListener('click', (e) => {
+        if (!panel.classList.contains('hidden') && !panel.contains(e.target) && !trigger.contains(e.target)) closePanel();
+      });
+      // Esc 关闭面板由弹窗统一处理
+
       root.querySelector('#tqcOk').onclick = () => {
         const name = root.querySelector('#tqcName').value.trim();
         if (!name) { UI.toast('请填写任务名称', 'warn'); return; }
         const type = root.querySelector('#tqcType').value;
+        const assigneeIds = selIds.slice();
         const t = NK.createTask({
           name,
           type,
           priority: 'P3',
           source: '花姐手动新增',
           dueDate: root.querySelector('#tqcDue').value,
-          engineer: root.querySelector('#tqcEng').value,
+          assigneeIds,
           nextAction: root.querySelector('#tqcNote').value.trim(),
         });
-        if (t.engineer) NK.addReminder(`任务待处理：${t.name}`, `${t.no} · ${t.engineer}`, 'task', t.id);
         NK.save();
-        UI.toast(`任务 ${t.no} 已创建，记下来啦 ✓`);
+        // 按人数显示不同成功文案
+        if (assigneeIds.length === 0) {
+          UI.toast(`任务 ${t.no} 已创建，当前未指派负责人 ✓`);
+        } else {
+          UI.toast(`任务 ${t.no} 已创建，共 ${assigneeIds.length} 名工程师需要分别完成 ✓`);
+        }
         UI.modalClose();
         UI.renderTasks();
       };
@@ -3051,6 +3138,27 @@ UI.taskDetail = (id) => {
   const v = NK.v.task(t);
   const d = t.dispatchId ? NK.getDispatch(t.dispatchId) : null;
   const upd = NK.db.taskUpdates.filter(u => u.taskId === id || u.refId === id);
+  // 多负责人工程师完成情况
+  const isMulti = NK.taskIsMulti(t);
+  const asHTML = isMulti ? (() => {
+    const ids = NK.taskAssigneeIds(t);
+    const cnt = ids.length;
+    const done = NK.taskCompletedCount(t);
+    const rows = ids.map(eid => {
+      const p = NK.taskAssigneeProgress(t, eid);
+      const doneState = p && p.completed;
+      const isCanceled = t.status === '已取消' || t.recordStatus === '已删除';
+      return `<div class="as-row ${doneState ? '' : ''} ${isCanceled ? 'as-cancel' : ''}">
+        <span class="as-state ${doneState ? 'as-done' : 'as-pend'}">${doneState ? '✓' : '○'}</span>
+        <span class="as-name">${NK.esc(NK.v.engName(NK.engineerName(eid)))}</span>
+        <span class="as-time">${p && p.completedAt ? NK.esc(p.completedAt.slice(0, 16).replace('T', ' ')) : (doneState ? '已完成' : '待完成')}</span>
+        ${isCanceled ? '' : (doneState
+          ? `<button class="btn btn-sm" onclick="UI.taskAssigneeToggle('${t.id}','${eid}')">恢复</button>`
+          : `<button class="btn btn-sm btn-accent" onclick="UI.taskAssigneeToggle('${t.id}','${eid}')">标为完成</button>`)}
+      </div>`;
+    }).join('');
+    return `<div class="as-progress"><div class="as-head"><span>工程师完成情况</span><span class="as-sum">${done}/${cnt} 已完成</span></div>${rows}</div>`;
+  })() : '';
   UI.modal(`任务详情 · ${t.no}`, `
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
       <span style="font-size:17px;font-weight:700">${NK.esc(t.name)}</span>
@@ -3058,12 +3166,13 @@ UI.taskDetail = (id) => {
     </div>
     <div class="detail-grid">
       <div class="dg-item"><div class="dg-label">职场</div><div class="dg-val">${NK.esc(v.siteName || '—')}${t.siteCity ? '（' + NK.esc(t.siteCity) + '）' : ''}</div></div>
-      <div class="dg-item"><div class="dg-label">工程师</div><div class="dg-val">${NK.esc(v.engineer || '未指派')}</div></div>
+      <div class="dg-item"><div class="dg-label">工程师</div><div class="dg-val">${isMulti ? NK.esc(NK.taskAssigneeLabel(t)) || '未指派' : NK.esc(v.engineer || '未指派')}</div></div>
       <div class="dg-item"><div class="dg-label">创建时间</div><div class="dg-val">${t.createdAt.slice(0, 16).replace('T', ' ')}</div></div>
       <div class="dg-item"><div class="dg-label">截止时间</div><div class="dg-val">${t.dueDate ? t.dueDate + (t.dueTime ? ' ' + t.dueTime : '') + '（' + NK.remainText(t.dueDate, t.dueTime) + '）' : '—'}</div></div>
       <div class="dg-item"><div class="dg-label">完成时间</div><div class="dg-val">${t.doneAt ? t.doneAt.slice(0, 16).replace('T', ' ') : '—'}</div></div>
       <div class="dg-item"><div class="dg-label">关联派单</div><div class="dg-val">${d ? `<a style="cursor:pointer;color:var(--accent)" onclick="UI.dispatchDetail('${d.id}')">${d.no} ${NK.esc(d.title)}</a>` : '—'}</div></div>
     </div>
+    ${isMulti ? asHTML : ''}
     ${t.nextAction ? `<div class="hint">下一步：${NK.esc(t.nextAction)}</div>` : ''}
     ${t.acceptRequire ? `<div class="hint">验收要求：${NK.esc(t.acceptRequire)}</div>` : ''}
     ${t.latestFeedback ? `<div class="msg-preview" style="white-space:pre-wrap">最新反馈：${NK.esc(t.latestFeedback)}</div>` : ''}
@@ -3073,8 +3182,122 @@ UI.taskDetail = (id) => {
       <div class="focus-item"><span class="badge gray">${(u.at || '').slice(5, 16).replace('T', ' ')}</span>
       <div class="fi-main"><div class="fi-meta">${NK.esc(u.content || u.feedback || '')}</div></div></div>`).join('')}</div>` : ''}`,
     `<button class="btn" data-close>关闭</button>
+     ${t.recordStatus !== '已删除' ? `<button class="btn" onclick="UI.taskEdit('${t.id}')">编辑</button>` : ''}
      ${t.status !== '已完成' ? `<button class="btn btn-accent" onclick="UI.taskFeedback('${t.id}')">更新反馈</button><button class="btn btn-warn" onclick="UI.taskUrgent('${t.id}')">催办</button>` : ''}`,
     { size: 'modal-lg' });
+};
+
+/** 编辑任务：改标题/截止/备注 + 增删工程师（多选面板） */
+UI.taskEdit = (id) => {
+  const t = NK.getTask(id);
+  if (!t) return;
+  const selIds = NK.taskAssigneeIds(t).slice();
+  const allEngs = NK.db.engineers.map(e => e.id);
+  const renderTrigger = (root) => {
+    const wrap = root.querySelector('#tqeEngWrap');
+    const selected = selIds.map(id => NK.engineerById(id)).filter(Boolean);
+    const allCount = allEngs.length;
+    let inner;
+    if (!selected.length) inner = `<span class="ms-placeholder">未指派</span>`;
+    else if (selected.length === allCount) inner = `<span class="ms-tag">已选全部 ${allCount} 名</span>`;
+    else inner = selected.map(e => `<span class="ms-tag">${NK.esc(NK.v.engName(e.name))}<span class="ms-tag-x" data-rm="${e.id}" title="移除">×</span></span>`).join('');
+    wrap.innerHTML = inner + `<span class="ms-caret">▾</span>`;
+    wrap.querySelectorAll('[data-rm]').forEach(x => x.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const rid = x.getAttribute('data-rm');
+      const i = selIds.indexOf(rid); if (i >= 0) selIds.splice(i, 1);
+      const box = root.querySelector(`.tqeMsOpt[value="${rid}"]`); if (box) box.checked = false;
+      renderTrigger(root); refreshBar(root);
+    }));
+  };
+  const refreshBar = (root) => {
+    const el = root.querySelector('#tqeMsCount'); if (el) el.textContent = `已选 ${selIds.length}/${allEngs.length} 名工程师`;
+  };
+  const engRows = NK.db.engineers.map(e => `
+    <label class="ms-opt">
+      <input type="checkbox" value="${e.id}" class="tqeMsOpt" ${selIds.includes(e.id) ? 'checked' : ''}>
+      <span class="ms-opt-name">${NK.esc(NK.v.engName(e.name))}</span>
+      <span class="ms-opt-region">${e.onsiteRegions.length ? '驻场：' + NK.esc(e.onsiteRegions.join('/')) : ''}</span>
+    </label>`).join('');
+  UI.modal(`编辑任务 · ${t.no}`, `
+    <div class="form-item"><label>任务名称 *</label><input id="tqeName" value="${NK.esc(t.name)}"></div>
+    <div class="form-item"><label>截止日期</label><input id="tqeDue" type="date" value="${NK.esc(t.dueDate || '')}"></div>
+    <div class="form-item"><label>负责工程师（可多选）</label>
+      <div class="ms-trigger" id="tqeEngTrigger" role="button" tabindex="0"><div id="tqeEngWrap"></div></div>
+      <div class="ms-panel hidden" id="tqeMsPanel">
+        <div class="ms-panel-bar">
+          <span class="ms-count" id="tqeMsCount"></span>
+          <span class="ms-bar-btns">
+            <button type="button" class="ms-bar-btn" id="tqeMsAll">全选 ${allEngs.length} 人</button>
+            <button type="button" class="ms-bar-btn" id="tqeMsClear">清空</button>
+          </span>
+        </div>
+        <div class="ms-panel-list">${engRows}</div>
+      </div>
+    </div>
+    <div class="form-item"><label>备注</label><textarea id="tqeNote" placeholder="任务要求、下一步等">${NK.esc(t.nextAction || '')}</textarea></div>`,
+    `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="tqeOk">保存修改</button>`, {
+    editable: true,
+    onMount(root, layer) {
+      const trigger = root.querySelector('#tqeEngTrigger');
+      const panel = root.querySelector('#tqeMsPanel');
+      renderTrigger(root); refreshBar(root);
+      const open = () => { panel.classList.remove('hidden'); trigger.classList.add('ms-open'); };
+      const close = () => { panel.classList.add('hidden'); trigger.classList.remove('ms-open'); };
+      trigger.addEventListener('click', (e) => { e.stopPropagation(); panel.classList.contains('hidden') ? open() : close(); });
+      panel.addEventListener('change', (e) => {
+        const cb = e.target; if (!cb.classList.contains('tqeMsOpt')) return;
+        const rid = cb.value; const i = selIds.indexOf(rid);
+        if (cb.checked && i < 0) selIds.push(rid);
+        if (!cb.checked && i >= 0) selIds.splice(i, 1);
+        renderTrigger(root); refreshBar(root);
+      });
+      root.querySelector('#tqeMsAll').addEventListener('click', (e) => { e.stopPropagation(); selIds.length = 0; selIds.push(...allEngs); panel.querySelectorAll('.tqeMsOpt').forEach(c => c.checked = true); renderTrigger(root); refreshBar(root); });
+      root.querySelector('#tqeMsClear').addEventListener('click', (e) => { e.stopPropagation(); selIds.length = 0; panel.querySelectorAll('.tqeMsOpt').forEach(c => c.checked = false); renderTrigger(root); refreshBar(root); });
+      layer.querySelector('.modal').addEventListener('click', (e) => {
+        if (!panel.classList.contains('hidden') && !panel.contains(e.target) && !trigger.contains(e.target)) close();
+      });
+      root.querySelector('#tqeOk').onclick = () => {
+        const name = root.querySelector('#tqeName').value.trim();
+        if (!name) { UI.toast('请填写任务名称', 'warn'); return; }
+        const newIds = NK.taskAssigneeIdsUnique(selIds);
+        // 有完成记录者被移除 → 需确认
+        const removedWithDone = t.assigneeProgress && t.assigneeProgress.filter(p => p.completed && !newIds.includes(p.engineerId)).length > 0;
+        const apply = () => {
+          t.name = name;
+          t.dueDate = root.querySelector('#tqeDue').value;
+          t.nextAction = root.querySelector('#tqeNote').value.trim();
+          NK.syncTaskAssignees(t, newIds);
+          t.updatedAt = NK.now();
+          NK.save();
+          UI.toast(`花姐，任务 ${t.no} 已更新 ✓`);
+          UI.modalClose();
+          UI.renderTasks();
+        };
+        if (removedWithDone) {
+          UI.confirm('有已完成记录的工程师被移除了，确认继续？', apply);
+        } else {
+          apply();
+        }
+      };
+    },
+  });
+};
+
+/** 多负责人任务：单个工程师 完成/恢复 切换（记录完成时间，联动主任务状态） */
+UI.taskAssigneeToggle = (id, engineerId) => {
+  const t = NK.getTask(id);
+  if (!t) return;
+  const p = NK.taskAssigneeProgress(t, engineerId);
+  const engName = NK.v.engName(NK.engineerName(engineerId));
+  const willDone = !(p && p.completed);
+  UI.confirm(`确认将「${t.name}」中「${engName}」${willDone ? '标记为已完成' : '恢复为未完成'}？`, () => {
+    NK.setAssigneeDone(t, engineerId, willDone);
+    NK.save();
+    UI.toast(`花姐，已${willDone ? '完成' : '恢复'}「${engName}」的执行项 ✓`);
+    UI.renderTasks();
+    UI.refreshBadges();
+  });
 };
 
 /** 任务更新反馈 */
@@ -3111,7 +3334,8 @@ UI.taskFeedback = (id) => {
 UI.taskUrgent = (id) => {
   const t = NK.getTask(id);
   if (!t) return;
-  const msg = `${t.engineer || '工程师'}，任务“${t.name}”${t.dueDate ? '计划于 ' + t.dueDate + ' 前完成' : '等待处理'}，请尽快反馈当前进度与预计完成时间，谢谢。`;
+  const engText = NK.taskIsMulti(t) ? (NK.taskAssigneeLabel(t) || '工程师') : (t.engineer || '工程师');
+  const msg = `${engText}，任务“${t.name}”${t.dueDate ? '计划于 ' + t.dueDate + ' 前完成' : '等待处理'}，请尽快反馈当前进度与预计完成时间，谢谢。`;
   UI.modal('催办消息', `
     <p>已生成催办消息（复制后发给工程师）：</p>
     <div class="msg-preview" style="white-space:pre-wrap">${NK.esc(msg)}</div>`,
@@ -3148,6 +3372,20 @@ UI.taskReactivate = (id) => {
 UI.taskDone = (id) => {
   const t = NK.getTask(id);
   if (!t) return;
+  // 多人任务：主任务整体完成需二次确认（一次完成所有负责人的执行项）
+  if (NK.taskIsMulti(t)) {
+    const cnt = NK.taskAssigneeCount(t);
+    const done = NK.taskCompletedCount(t);
+    UI.confirm(`「${t.name}」当前有 ${cnt} 名负责工程师（已完成 ${done}/${cnt}）。\n确认将全部 ${cnt} 名工程师标记为已完成，并整体完成任务？`, () => {
+      // 逐个标记完成（setAssigneeDone 同步主任务状态）
+      NK.taskAssigneeIds(t).forEach(eid => NK.setAssigneeDone(t, eid, true));
+      NK.save();
+      UI.toast(`花姐，任务 ${t.no} 全部 ${cnt} 名工程师完成 ✓`);
+      UI.renderTasks();
+      UI.refreshBadges();
+    });
+    return;
+  }
   UI.confirm(`确认任务「${t.name}」已完成？`, () => {
     NK.setTaskStatus(t, '已完成');
     UI.toast(`花姐，任务 ${t.no} 已完成 ✓`);

@@ -220,6 +220,7 @@ NK.initDB = () => {
     NK.migrateFixedTasks();   // 固定任务升级 + 清理旧演示/预置数据（幂等）
     NK.migrateDispatchTaskSync(); // 派单关联任务同步（去重 + 状态对齐，幂等）
     NK.migrateConsumableReminder(); // HP耗材提醒 → 每日邮件检查（幂等）
+    NK.migrateAssigneeIds();  // 任务多负责人向后兼容：assigneeId → assigneeIds（幂等）
     NK.ensureFixedTasks();    // 生成今日/本月应出现的固定任务实例
     NK.save();
     return;
@@ -571,6 +572,156 @@ NK.taskActive = (t) => {
 };
 /** 历史/非当前有效任务（取消、删除，或关联派单已失效）——仍可在历史/回收站查看 */
 NK.taskInactive = (t) => !NK.taskActive(t);
+
+/* ============================================================
+   任务·多负责人（assigneeIds + assigneeProgress）
+   规则：
+   · 一条主任务保存多个工程师ID（assigneeIds）+ 每人独立完成状态（assigneeProgress）
+   · 页面只展示一条汇总任务；按工程师分别标记完成/恢复，动态计算已完成人数
+   · 兼容旧数据：仅含 assigneeId / engineer 的任务自动视为单人负责人任务
+   · 未指派任务（无负责人）不创建 assigneeProgress，沿用原普通任务完成逻辑
+   ============================================================ */
+/** 按工程师ID取工程师资料 */
+NK.engineerById = (id) => NK.db.engineers.find(e => e.id === id);
+/** 取工程师显示名（按ID，找不到回退原始值） */
+NK.engineerName = (id) => {
+  const e = NK.engineerById(id);
+  return e ? e.name : (typeof id === 'string' ? id : '');
+};
+
+/** 任务的负责人ID数组（向后兼容 assigneeId → [assigneeId]；再回退 engineer 名 → [其ID]） */
+NK.taskAssigneeIds = (t) => {
+  if (!t) return [];
+  if (Array.isArray(t.assigneeIds) && t.assigneeIds.length) return t.assigneeIds.slice();
+  if (t.assigneeId) return [t.assigneeId];
+  if (t.engineer) { const e = NK.getEngineer(t.engineer); if (e) return [e.id]; }
+  return [];
+};
+/** 任务的负责人ID去重（编辑时新增不重复） */
+NK.taskAssigneeIdsUnique = (ids) => {
+  const seen = new Set(); const out = [];
+  (Array.isArray(ids) ? ids : []).forEach(id => { if (id && !seen.has(id)) { seen.add(id); out.push(id); } });
+  return out;
+};
+/** 负责人名称数组（按ID实时查；找不到ID时回退为ID本身） */
+NK.taskAssigneeNames = (t) => NK.taskAssigneeIds(t).map(id => NK.engineerName(id));
+
+/** 按负责人ID取任务内完成明细（无则返回 null） */
+NK.taskAssigneeProgress = (t, engineerId) =>
+  (Array.isArray(t.assigneeProgress) ? t.assigneeProgress : []).find(p => p.engineerId === engineerId) || null;
+/** 已完成负责人数 */
+NK.taskCompletedCount = (t) =>
+  (Array.isArray(t.assigneeProgress) ? t.assigneeProgress.filter(p => p.completed) : []).length;
+/** 是否多人任务（assigneeIds 显式存在且 ≥1；区别于仅靠 engineer 名的旧单人任务） */
+NK.taskIsMulti = (t) => !!(t && Array.isArray(t.assigneeIds) && t.assigneeIds.length);
+/** 当前负责人总数（旧单人任务视为 1；未指派为 0） */
+NK.taskAssigneeCount = (t) => NK.taskAssigneeIds(t).length;
+
+/** 任务负责人汇总文案（用于列表/详情/时间轴/重点）
+ *  - 未指派 → ''（上层自行决定显示"未指派"）
+ *  - 旧单人任务 → 工程师名
+ *  - 多人任务：人数少显示姓名，人多显示"N名工程师"
+ */
+NK.taskAssigneeLabel = (t) => {
+  const ids = NK.taskAssigneeIds(t);
+  if (!ids.length) return '';
+  const names = NK.taskAssigneeNames(t);
+  if (ids.length === 1) return names[0];
+  if (ids.length <= 3) return names.join('、');
+  return `${ids.length}名工程师`;
+};
+/** 任务负责人进度文案："x/y已完成"；旧单人任务/未指派返回 '' */
+NK.taskProgressLabel = (t) => {
+  const ids = NK.taskAssigneeIds(t);
+  if (!ids.length || ids.length === 1) return '';
+  return `${NK.taskCompletedCount(t)}/${ids.length}已完成`;
+};
+/** 多人任务是否全员完成（当前有效负责人全部标记完成） */
+NK.taskAllDone = (t) => {
+  const ids = NK.taskAssigneeIds(t);
+  if (!ids.length) return t.status === '已完成';
+  return NK.taskCompletedCount(t) >= ids.length;
+};
+
+/** 重点/告警中展示的工程师标签：多人用聚合标签，单人/未指派用原名或"待分配" */
+NK.focusEngLabel = (t) => {
+  if (NK.taskIsMulti(t)) return NK.taskAssigneeLabel(t) || '待分配';
+  return NK.v.engName(t.engineer) || '待分配';
+};
+
+/** 设置某负责人的完成状态。返回是否全员完成。同步主任务状态（仅当前有效任务）。 */
+NK.setAssigneeDone = (t, engineerId, done) => {
+  if (!t) return false;
+  const p = NK.taskAssigneeProgress(t, engineerId);
+  if (!p) return false;
+  p.completed = !!done;
+  p.completedAt = done ? NK.now() : null;
+  t.updatedAt = NK.now();
+  const allDone = NK.taskAllDone(t);
+  if (allDone && t.status !== '已完成') NK.setTaskStatus(t, '已完成');
+  else if (!allDone && t.status === '已完成' && !NK.dispatchOfTask(t) && !NK.taskInactive(t)) NK.setTaskStatus(t, '待处理');
+  else NK.save();
+  return allDone;
+};
+
+/**
+ * 按一组负责人ID重建任务的 assigneeIds + assigneeProgress。
+ * 保留已有人员的完成状态；新增人员初始化为未完成；移除人员时丢弃其进度。
+ * 若最终无负责人 → 清空 assigneeIds/assigneeProgress（回到未指派）。
+ */
+NK.syncTaskAssignees = (t, ids) => {
+  const uniq = NK.taskAssigneeIdsUnique(ids);
+  const old = Array.isArray(t.assigneeProgress) ? t.assigneeProgress : [];
+  t.assigneeIds = uniq.slice();
+  if (uniq.length) {
+    t.assigneeProgress = uniq.map(id => {
+      const prev = old.find(p => p.engineerId === id);
+      return prev
+        ? { engineerId: id, name: prev.name || NK.engineerName(id), completed: !!prev.completed, completedAt: prev.completedAt || null }
+        : { engineerId: id, name: NK.engineerName(id), completed: false, completedAt: null };
+    });
+    // 首位负责人作为 engineer 字段快照（兼容其它消费面）
+    t.engineer = NK.engineerName(uniq[0]);
+  } else {
+    t.assigneeProgress = [];
+    t.engineer = '';
+  }
+  t.updatedAt = NK.now();
+  NK.save();
+  return t;
+};
+
+/**
+ * 创建任务。data 支持 assigneeIds（数组）→ 自动构造 assigneeProgress。
+ * 单人/未指派时若不传 assigneeIds，仍可传 engineer（兼容旧路径）。
+ */
+NK.createTask = (data) => {
+  const nowIso = NK.now();
+  const task = {
+    id: NK.uid('T'),
+    no: NK.nextNo('task'),
+    name: data.name, type: data.type || '临时任务', priority: data.priority || 'P3',
+    source: data.source || '手动录入',
+    siteId: data.siteId || '', siteName: data.siteName || '', siteCity: data.siteCity || '',
+    engineer: data.engineer || '',
+    createdAt: nowIso, startAt: data.startAt || '', dueDate: data.dueDate || '', dueTime: data.dueTime || '',
+    doneAt: '', status: data.status || '待处理',
+    latestFeedback: '', nextAction: data.nextAction || '', result: '',
+    acceptResult: '', acceptRequire: data.acceptRequire || '',
+    dispatchId: data.dispatchId || '', projectId: data.projectId || '',
+    workNo: data.workNo || '', tags: data.tags || [], updatedAt: nowIso, kpiCounted: false,
+  };
+  // 多负责人：assigneeIds + assigneeProgress
+  if (Array.isArray(data.assigneeIds) && data.assigneeIds.length) {
+    const uniq = NK.taskAssigneeIdsUnique(data.assigneeIds);
+    task.assigneeIds = uniq.slice();
+    task.assigneeProgress = uniq.map(id => ({ engineerId: id, name: NK.engineerName(id), completed: false, completedAt: null }));
+    task.engineer = NK.engineerName(uniq[0]);
+  }
+  NK.db.tasks.push(task);
+  NK.save();
+  return task;
+};
 
 /**
  * 创建派单（核心：一次操作完成多项工作）
@@ -1179,28 +1330,8 @@ NK.urgent = (d) => {
 };
 
 /* ============================================================
-   任务
+   任务 · 状态
    ============================================================ */
-NK.createTask = (data) => {
-  const nowIso = NK.now();
-  const task = {
-    id: NK.uid('T'),
-    no: NK.nextNo('task'),
-    name: data.name, type: data.type || '临时任务', priority: data.priority || 'P3',
-    source: data.source || '手动录入',
-    siteId: data.siteId || '', siteName: data.siteName || '', siteCity: data.siteCity || '',
-    engineer: data.engineer || '',
-    createdAt: nowIso, startAt: data.startAt || '', dueDate: data.dueDate || '', dueTime: data.dueTime || '',
-    doneAt: '', status: data.status || '待处理',
-    latestFeedback: '', nextAction: data.nextAction || '', result: '',
-    acceptResult: '', acceptRequire: data.acceptRequire || '',
-    dispatchId: data.dispatchId || '', projectId: data.projectId || '',
-    workNo: data.workNo || '', tags: data.tags || [], updatedAt: nowIso, kpiCounted: false,
-  };
-  NK.db.tasks.push(task);
-  NK.save();
-  return task;
-};
 NK.setTaskStatus = (t, status) => {
   const nowIso = NK.now();
   t.status = status; t.updatedAt = nowIso;
@@ -1708,7 +1839,7 @@ NK.genFocusItems = () => {
       tag: 'P1超时',
       tagLevel: 'danger',
       title: t.name,
-      line1: `${NK.v.siteName(t.siteName) || '—'} · ${NK.v.engName(t.engineer) || '待分配'}`,
+      line1: `${NK.v.siteName(t.siteName) || '—'} · ${NK.focusEngLabel(t)}`,
       line2: overdue
         ? `已超时 ${NK.humanDur(new Date(today + 'T23:59:59').getTime() - new Date(t.dueDate + 'T23:59:59').getTime())}，截止 ${t.dueDate}`
         : `已等待 ${wait}`,
@@ -1731,7 +1862,7 @@ NK.genFocusItems = () => {
       tag: '已超时',
       tagLevel: 'danger',
       title: t.name,
-      line1: `${NK.v.siteName(t.siteName) || '—'} · ${NK.v.engName(t.engineer) || '待分配'}`,
+      line1: `${NK.v.siteName(t.siteName) || '—'} · ${NK.focusEngLabel(t)}`,
       line2: `已超时 ${wait}，截止 ${t.dueDate}`,
       line3: '需要尽快处理',
       actionBtn: '查看处理',
@@ -1841,7 +1972,7 @@ NK.genFocusItems = () => {
       tag: '即将到期',
       tagLevel: 'warn',
       title: t.name,
-      line1: `${NK.v.siteName(t.siteName) || '—'} · ${NK.v.engName(t.engineer) || '—'}`,
+      line1: `${NK.v.siteName(t.siteName) || '—'} · ${NK.focusEngLabel(t)}`,
       line2: `截止 ${t.dueDate}，${remaining}`,
       line3: '建议今天优先完成',
       actionBtn: '查看进度',
@@ -2048,7 +2179,14 @@ NK.v = {
     return { ...d, siteName: NK.v.siteName(d.siteName), address: NK.v.address(d.address), contactPhone: NK.v.phone(d.contactPhone), engineer: NK.v.engName(d.engineer) };
   },
   task(t) {
-    return { ...t, siteName: NK.v.siteName(t.siteName), engineer: NK.v.engName(t.engineer) };
+    const ids = NK.taskAssigneeIds(t);
+    return {
+      ...t, siteName: NK.v.siteName(t.siteName),
+      engineer: NK.v.engName(t.engineer),
+      // 多负责人聚合展示字段
+      assignees: ids.map(id => NK.v.engName(NK.engineerName(id))),
+      assigneeIds: ids,
+    };
   },
   eng(e) {
     return { ...e, name: NK.v.engName(e.name), phone: NK.v.phone(e.phone), onsiteRaw: e.onsiteRaw, remoteRaw: e.remoteRaw };
@@ -2328,6 +2466,45 @@ NK.migrateDispatchTaskSync = () => {
         t.deletedAt = '';
         t.updatedAt = nowIso;
       }
+    }
+  });
+  NK.save();
+};
+
+/* ============================================================
+   任务多负责人 · 历史数据向后兼容
+   已有任务若只保存 assigneeId（或仅 engineer 名），加载时兼容转换为负责人列表。
+   幂等、可重复调用，不清空/不修改已有任务标题、完成状态、截止日期、备注。
+   ============================================================ */
+NK.migrateAssigneeIds = () => {
+  (NK.db.tasks || []).forEach(t => {
+    if (!t) return;
+    // 仅当尚无 assigneeIds 时才兼容转换（不覆盖已有的多负责人任务）
+    if (!Array.isArray(t.assigneeIds)) {
+      let ids = [];
+      if (t.assigneeId) ids = [t.assigneeId];
+      else if (t.engineer) { const e = NK.getEngineer(t.engineer); if (e) ids = [e.id]; }
+      if (ids.length) {
+        t.assigneeIds = ids.slice();
+        // 保留已有状态：若有 assigneeProgress 用其完成态，否则初始化为未完成（不误标完成）
+        if (!Array.isArray(t.assigneeProgress)) {
+          t.assigneeProgress = ids.map(id => ({ engineerId: id, name: NK.engineerName(id), completed: false, completedAt: null }));
+        }
+      } else {
+        // 未指派任务：保持无负责人，不创建 assigneeProgress
+        t.assigneeIds = [];
+        t.assigneeProgress = [];
+      }
+    }
+    // 兜底：assigneeIds 存在但 assigneeProgress 缺失/长度不符 → 补齐
+    if (Array.isArray(t.assigneeIds) && t.assigneeIds.length) {
+      const cur = Array.isArray(t.assigneeProgress) ? t.assigneeProgress : [];
+      const map = {}; cur.forEach(p => { if (p && p.engineerId) map[p.engineerId] = p; });
+      t.assigneeProgress = NK.taskAssigneeIdsUnique(t.assigneeIds).map(id =>
+        map[id]
+          ? { engineerId: id, name: map[id].name || NK.engineerName(id), completed: !!map[id].completed, completedAt: map[id].completedAt || null }
+          : { engineerId: id, name: NK.engineerName(id), completed: false, completedAt: null }
+      );
     }
   });
   NK.save();

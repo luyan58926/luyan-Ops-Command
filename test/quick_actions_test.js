@@ -178,7 +178,7 @@ const formOk = run(`(() => {
   const hasName = /id="tqcName"/.test(s);
   const hasType = /id="tqcType"/.test(s) && s.includes('专项任务') && s.includes('普通任务');
   const hasDue = /id="tqcDue" type="date"/.test(s);
-  const hasEng = /id="tqcEng"/.test(s) && /未指派/.test(s);
+  const hasEng = /id="tqcEngTrigger"/.test(s) && /id="tqcMsPanel"/.test(s) && /未指派/.test(s) && /全选/.test(s) && /清空/.test(s);
   const hasNote = /id="tqcNote"/.test(s);
   const hasButtons = s.includes('取消') && s.includes('创建任务');
   return { hasName, hasType, hasDue, hasEng, hasNote, hasButtons };
@@ -186,13 +186,13 @@ const formOk = run(`(() => {
 ok(formOk.hasName, '任务名称字段存在（必填）');
 ok(formOk.hasType, '任务类型字段：专项任务默认 + 普通任务');
 ok(formOk.hasDue, '截止日期字段 type=date（浏览器本地）');
-ok(formOk.hasEng, '负责工程师字段存在（可选，含未指派）');
+ok(formOk.hasEng, '负责工程师字段为多选面板（未指派/全选/清空）');
 ok(formOk.hasNote, '备注字段存在（可选）');
 ok(formOk.hasButtons, '仅 取消 / 创建任务 两个按钮');
 // 工程师复用 9 位
 const engCount = run(`NK.db.engineers.length`);
 ok(engCount === 9, '工程师池共 ' + engCount + ' 位（复用）');
-ok(run(`UI.taskQuickCreate.toString()`).includes('NK.db.engineers.map'), '新增任务表单复用工程师下拉选项');
+ok(run(`UI.taskQuickCreate.toString()`).includes('NK.db.engineers.map'), '新增任务表单复用工程师列表选项');
 
 console.log('== 轻量新增任务（专项任务默认）==');
 const beforeTaskCount = run(`NK.db.tasks.length`);

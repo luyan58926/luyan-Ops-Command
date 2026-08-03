@@ -949,6 +949,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .tl-name { font-weight: 600; font-size: 12.5px; }
 .tl-item.tl-done .tl-name { color: var(--text-3); text-decoration: line-through; }
 .tl-note { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+.tl-prog { display: inline-flex; align-items: center; margin-left: 7px; vertical-align: middle; font-size: 10.5px; font-weight: 700; color: var(--accent); background: var(--accent-soft); padding: 1px 7px; border-radius: 8px; }
 
 /* 来源标签胶囊（派单/日常/专项/任务）· 文字简洁、无Emoji、低饱和 */
 .tl-src-wrap { display: inline-flex; align-items: center; margin-right: 6px; vertical-align: middle; }
@@ -1280,4 +1281,79 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 /* —— 空状态 / 全部完成 —— */
 .tasks-ov .fx-empty { padding: 28px 8px; text-align: center; color: var(--text-3); font-size: 13px; }
 .tasks-ov .fx-all-done { padding: 2px 4px 14px; text-align: center; color: var(--text-2); font-size: 12.5px; }
+
+/* ============================================================
+   多选工程师面板（新增任务 · 负责工程师）
+   ============================================================ */
+/* 触发器：外观与普通 select 一致，内嵌选中标签 */
+.ms-trigger {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 5px; min-height: 36px;
+  width: 100%; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 5px 8px; outline: none; cursor: pointer; background: #fff; text-align: left;
+  transition: border-color .12s, box-shadow .12s;
+}
+.ms-trigger:hover { border-color: var(--accent); }
+.ms-trigger.ms-open { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,106,170,.14); }
+.ms-trigger .ms-placeholder { color: var(--text-3); font-size: 13px; }
+.ms-trigger .ms-caret { margin-left: auto; color: var(--text-3); font-size: 11px; padding-left: 6px; }
+/* 选中工程师标签 */
+.ms-tag {
+  display: inline-flex; align-items: center; gap: 3px; font-size: 12px; font-weight: 600;
+  color: var(--accent); background: var(--accent-soft); border: 1px solid rgba(124,106,170,.28);
+  padding: 1px 7px; border-radius: 12px; line-height: 1.5;
+}
+.ms-tag .ms-tag-x {
+  cursor: pointer; font-size: 13px; line-height: 1; color: var(--text-3); padding: 0 1px;
+  border-radius: 50%;
+}
+.ms-tag .ms-tag-x:hover { color: var(--danger); background: rgba(0,0,0,.05); }
+/* 下拉面板 */
+.ms-panel {
+  margin-top: 6px; border: 1px solid var(--border); border-radius: 8px; background: #fff;
+  box-shadow: 0 6px 24px rgba(30,25,50,.12); overflow: hidden; z-index: 30;
+}
+.ms-panel-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border); background: #faf9fc; font-size: 12px;
+}
+.ms-panel-bar .ms-count { color: var(--text-3); font-size: 12px; }
+.ms-panel-bar .ms-bar-btns { display: flex; gap: 6px; }
+.ms-bar-btn {
+  border: 1px solid var(--border); background: #fff; color: var(--text-2);
+  font-size: 11.5px; font-weight: 600; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+  transition: all .12s;
+}
+.ms-bar-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ms-panel-list { max-height: 260px; overflow: auto; padding: 4px; }
+.ms-opt {
+  display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 7px;
+  cursor: pointer; font-size: 13px; transition: background .1s;
+}
+.ms-opt:hover { background: var(--accent-soft); }
+.ms-opt input { accent-color: var(--accent); flex-shrink: 0; }
+.ms-opt .ms-opt-name { font-weight: 500; color: var(--text); flex-shrink: 0; }
+.ms-opt .ms-opt-region { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 多负责人任务 · 工程师完成情况列表 */
+.as-progress {
+  margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+}
+.as-progress .as-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px; font-size: 12px; font-weight: 700; color: var(--text-2);
+  background: #faf9fc; border-bottom: 1px solid var(--border);
+}
+.as-progress .as-head .as-sum { color: var(--text-3); font-weight: 500; }
+.as-progress .as-row {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 13px;
+  border-bottom: 1px solid var(--border); transition: background .1s;
+}
+.as-progress .as-row:last-child { border-bottom: none; }
+.as-progress .as-row:hover { background: #faf9fc; }
+.as-progress .as-name { font-weight: 600; color: var(--text); flex: 1; min-width: 0; }
+.as-progress .as-time { font-size: 11px; color: var(--text-3); font-family: var(--mono); }
+.as-progress .as-state { font-size: 11px; font-weight: 700; }
+.as-progress .as-state.as-done { color: var(--ok); }
+.as-progress .as-state.as-pend { color: var(--text-3); }
+.as-progress .as-row.as-cancel { opacity: .55; }
+.as-progress .as-row.as-cancel .as-state { color: var(--text-3); }
 

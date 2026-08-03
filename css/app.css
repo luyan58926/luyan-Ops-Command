@@ -1141,3 +1141,79 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .dp-sup-actions { display: flex; gap: 8px; margin-top: 10px; }
 .dp-sup-actions .btn-mini { padding: 5px 12px; font-size: 12px; border-radius: var(--radius-sm); cursor: pointer; }
 .dp-sup-history { font-size: 11px; color: var(--text-3); margin-top: 8px; line-height: 1.6; }
+
+/* ============================================================
+   任务与告警页 · 今日固定任务 & 实时告警 阅读层次优化
+   仅作用于「任务与告警」页两个模块（.tasks-ov 作用域）
+   ============================================================ */
+.tasks-ov { padding: 8px 22px; max-height: 440px; overflow-y: auto; scrollbar-width: thin; }
+.tasks-ov::-webkit-scrollbar { width: 6px; }
+.tasks-ov::-webkit-scrollbar-thumb { background: #d5dae3; border-radius: 3px; }
+
+/* —— 今日固定任务 · 三列：状态图标｜任务内容｜状态信息 —— */
+.tasks-ov .focus-item.fx-daily {
+  display: flex; align-items: center; gap: 13px;
+  padding: 15px 0; min-width: 0;
+}
+/* 浅分隔线只从文字区域开始，不穿过左侧状态图标 */
+.tasks-ov .focus-item.fx-daily + .focus-item.fx-daily .fi-main { box-shadow: inset 0 1px 0 var(--border); }
+.tasks-ov .fx-status {
+  width: 18px; height: 18px; border-radius: 50%; flex-shrink: 0;
+  border: 2px solid rgba(124, 106, 170, .55); background: #fff;
+}
+.tasks-ov .focus-item.fx-done .fx-status {
+  background: var(--ok); border-color: var(--ok);
+  color: #fff; font-size: 10.5px; font-weight: 700; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.tasks-ov .fx-daily .fi-main { flex: 1; min-width: 0; }
+.tasks-ov .fx-daily .fi-title {
+  font-size: 14px; font-weight: 600; color: var(--text);
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.tasks-ov .fx-daily .fi-title .badge { font-size: 10px; padding: 0 6px; font-weight: 600; }
+.tasks-ov .fx-emoji { font-size: 13.5px; line-height: 1; }
+.tasks-ov .fx-daily .fi-meta {
+  font-size: 12.5px; color: var(--text-2); margin-top: 3px; line-height: 1.5;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.tasks-ov .focus-item.fx-done .fi-title { color: var(--text-3); text-decoration: line-through; }
+.tasks-ov .focus-item.fx-done .fi-meta { color: var(--text-3); }
+.tasks-ov .fx-done-label { font-size: 11.5px; color: var(--ok); font-weight: 600; white-space: nowrap; }
+.tasks-ov .fx-daily .fi-actions { flex-shrink: 0; display: flex; align-items: center; }
+.tasks-ov .fx-daily .fi-actions .btn { white-space: nowrap; }
+
+/* —— 实时告警 · 轻量提醒块 —— */
+.tasks-ov .al-item {
+  display: flex; align-items: center; gap: 12px;
+  border-radius: 13px; padding: 12px 14px; margin: 10px 0;
+  transition: background .15s ease;
+}
+.tasks-ov .al-item.al-danger { background: var(--danger-soft); }
+.tasks-ov .al-item.al-danger:hover { background: #fbe4e4; }
+.tasks-ov .al-item.al-clock { background: var(--warn-soft); }
+.tasks-ov .al-item.al-clock:hover { background: #faeed3; }
+.tasks-ov .al-item.al-cal { background: var(--info-soft); }
+.tasks-ov .al-item.al-cal:hover { background: #e9e4f7; }
+.tasks-ov .al-item.al-eye { background: #f6f7fa; }
+.tasks-ov .al-item.al-eye:hover { background: #eef0f5; }
+.tasks-ov .al-item .al-main { flex: 1; min-width: 0; }
+.tasks-ov .al-item .al-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13.5px; font-weight: 600; color: var(--text);
+}
+.tasks-ov .al-item .al-emoji { font-size: 13px; line-height: 1; }
+.tasks-ov .al-item .al-body {
+  font-size: 13px; color: var(--text-2); margin-top: 2px; line-height: 1.5;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.tasks-ov .al-item .al-meta {
+  font-size: 11.5px; color: var(--text-3); margin-top: 4px; font-family: var(--mono);
+}
+.tasks-ov .al-item .al-actions { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
+.tasks-ov .al-item .al-actions .btn { white-space: nowrap; }
+
+/* —— 空状态 / 全部完成 —— */
+.tasks-ov .fx-empty { padding: 28px 8px; text-align: center; color: var(--text-3); font-size: 13px; }
+.tasks-ov .fx-all-done { padding: 2px 4px 14px; text-align: center; color: var(--text-2); font-size: 12.5px; }
+

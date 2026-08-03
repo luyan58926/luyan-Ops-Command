@@ -1971,6 +1971,43 @@ UI.act = (act, arg) => {
 /* ============================================================
    任务与告警中心
    ============================================================ */
+/** 固定任务辅助Emoji：只对少量有明确时间含义的任务使用，不替代状态图标 */
+UI.fixedEmoji = (tplId) => ({ TPL003: '⏰', TPL004: '🌙', TPL005: '📧', TPL014: '📅' }[tplId] || '');
+/** 实时告警类型Emoji：按提醒性质映射（展示层，不修改告警逻辑） */
+UI.alertEmoji = (r) => {
+  const t = r.title || '';
+  if (r.level === 'danger' || /异常/.test(t)) return '🚨';
+  if (/上门/.test(t)) return '📅';
+  if (/到期|超时|截止|已过|不足24/.test(t)) return '⏰';
+  return '👀';
+};
+/** 告警块背景基调：极淡色区分提醒性质，不统一橙色 */
+UI.alertTone = (r) => {
+  const t = r.title || '';
+  if (r.level === 'danger' || /异常/.test(t)) return 'danger';
+  if (/上门/.test(t)) return 'cal';
+  if (/到期|超时|截止|已过|不足24/.test(t)) return 'clock';
+  return 'eye';
+};
+/** 展示层拆分：正文 vs 关联编号/供应商/日期（不修改任何业务数据） */
+UI.alertParts = (r) => {
+  let s = r.content || '';
+  const meta = [];
+  const no = s.match(/[A-Z]{2,4}\d{6,8}-\d+/);
+  if (no) { meta.push(no[0]); s = s.replace(no[0], ''); }
+  const supB = s.match(/（([^（）]{1,14})）/);
+  if (supB && !/^\d{4}-\d{2}-\d{2}$/.test(supB[1])) { meta.push(supB[1]); s = s.replace(supB[0], ''); }
+  s = s.replace(/（\d{4}-\d{2}-\d{2}）/g, '');
+  const supK = s.match(/供应商[:：]\s*([^，,。;；\s]+)/);
+  if (supK) { meta.push(supK[1]); s = s.replace(supK[0], ''); }
+  const d = s.match(/\d{4}-\d{2}-\d{2}/);
+  if (d) { meta.push(d[0]); s = s.replace(d[0], ''); }
+  if (/今日到期/.test(r.content || '')) meta.push('今日到期');
+  s = s.replace(/今日到期/g, '');
+  if (/上门/.test(r.title || '')) s = s.replace(/(今日|明日)\s*上门/g, '');
+  s = s.replace(/截止\s*$/, '').replace(/[,，;；]\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  return { body: s, meta: meta.join(' · ') };
+};
 UI.renderTasks = () => {
   const el = document.getElementById('view-tasks');
   const f = NK.taskFilter = NK.taskFilter || {};
@@ -2005,20 +2042,22 @@ UI.renderTasks = () => {
   // 今日固定任务（系统固定任务·每日类）进度
   const dailyTasks = NK.db.tasks.filter(t => NK.taskActive(t) && t.source === '系统固定任务' &&
     ['每日', '每日14:30', '每日下班前'].includes(t.frequency) && t.fixedDate === today);
+  const doneCount = dailyTasks.filter(x => x.status === '已完成').length;
   const dailyHTML = `<div class="card"><div class="card-head"><div class="card-title">今日固定任务（每日）</div>
-    <span class="badge accent">${dailyTasks.filter(x => x.status === '已完成').length}/${dailyTasks.length} 完成</span></div>
-    <div class="card-body flush">${dailyTasks.length ? dailyTasks.map(t => {
+    <span class="badge accent">${doneCount}/${dailyTasks.length} 完成</span></div>
+    <div class="card-body flush tasks-ov tasks-ov-fixed">${dailyTasks.length ? dailyTasks.map(t => {
       const tpl = NK.FIXED_TASKS.find(x => x.id === t.templateId);
       const done = t.status === '已完成';
-      return `<div class="focus-item">
-        <span class="badge ${done ? 'done' : 'wait'}">${done ? '✓' : '待办'}</span>
+      const emoji = UI.fixedEmoji(t.templateId);
+      return `<div class="focus-item fx-daily${done ? ' fx-done' : ''}">
+        <span class="fx-status">${done ? '✓' : ''}</span>
         <div class="fi-main">
-          <div class="fi-title">${NK.esc(t.name)} ${UI.priBadge(t.priority)}</div>
-          <div class="fi-meta">${NK.esc(tpl ? tpl.requirement : t.nextAction || '')} · ${NK.esc(t.frequency || '')}${t.fixedTime ? ' · ' + NK.esc(t.fixedTime) : ''}</div>
+          <div class="fi-title">${emoji ? `<span class="fx-emoji">${emoji}</span>` : ''}${NK.esc(t.name)} ${UI.priBadge(t.priority)}</div>
+          <div class="fi-meta">${NK.esc((tpl ? tpl.requirement : t.nextAction || '').replace(/[。.]$/, ''))} · ${NK.esc(t.frequency || '')}</div>
         </div>
-        <div class="fi-actions">${done ? `<span style="font-size:11px;color:var(--text-3)">已完成</span>` : `<button class="btn btn-sm btn-accent" onclick="UI.taskDone('${t.id}')">标为完成</button>`}</div>
+        <div class="fi-actions">${done ? `<span class="fx-done-label">已完成</span>` : `<button class="btn btn-sm btn-accent" onclick="UI.taskDone('${t.id}')">标为完成</button>`}</div>
       </div>`;
-    }).join('') : '<div class="tbl-empty" style="padding:24px">今日每日固定任务已全部完成 ✨</div>'}</div></div>`;
+    }).join('') + (dailyTasks.length && doneCount === dailyTasks.length ? `<div class="fx-all-done">今天的固定任务都完成了，节奏挺稳。✅</div>` : '') : '<div class="fx-empty">✨ 今日暂无固定任务</div>'}</div></div>`;
 
   const alertHTML = `<div class="card"><div class="card-head"><div class="card-title">实时告警</div><span class="badge ${danger.length ? 'risk' : 'done'}">${danger.length} 危险 / ${warn.length} 提醒</span>
       <span class="al-head-actions">
@@ -2032,12 +2071,17 @@ UI.renderTasks = () => {
         </span>
       </span>
     </div>
-    <div class="card-body flush">${rem.length ? rem.map(r => `
-      <div class="focus-item">
-        <span class="badge ${r.level === 'danger' ? 'risk' : r.level === 'accent' ? 'proc' : 'wait'}">${r.level === 'danger' ? '紧急' : r.level === 'accent' ? '验收' : '提醒'}</span>
-        <div class="fi-main"><div class="fi-title">${NK.esc(r.title)}</div><div class="fi-meta">${NK.esc(r.content)}</div></div>
-        <div class="fi-actions">${(r.actions || []).map(a => `<button class="btn btn-sm" onclick="UI.act('${a.act === 'dispatch' ? 'dispatchDetail' : a.act === 'task' ? 'taskDetail' : 'projectDetail'}','${a.arg}')">${a.label}</button>`).join('')}</div>
-      </div>`).join('') : `<div class="tbl-empty" style="padding:24px">✅ 暂无告警，一切正常。</div>`}</div></div>`;
+    <div class="card-body flush tasks-ov tasks-ov-alert">${rem.length ? rem.map(r => {
+      const p = UI.alertParts(r);
+      return `<div class="al-item al-${UI.alertTone(r)}">
+        <div class="al-main">
+          <div class="al-head"><span class="al-emoji">${UI.alertEmoji(r)}</span>${NK.esc(r.title)}</div>
+          <div class="al-body">${NK.esc(p.body)}</div>
+          ${p.meta ? `<div class="al-meta">${NK.esc(p.meta)}</div>` : ''}
+        </div>
+        <div class="al-actions">${(r.actions || []).map(a => `<button class="btn btn-sm" onclick="UI.act('${a.act === 'dispatch' ? 'dispatchDetail' : a.act === 'task' ? 'taskDetail' : 'projectDetail'}','${a.arg}')">${a.label}</button>`).join('')}</div>
+      </div>`;
+    }).join('') : '<div class="fx-empty">✨ 当前没有需要处理的告警，盘面很干净。</div>'}</div></div>`;
 
   const statusOpts = ['全部', ...NK.TASK_STATUS];
   const typeOpts = ['全部', ...NK.TASK_TYPES];

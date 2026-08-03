@@ -28,7 +28,7 @@
       <div id="modeSwitch" class="mode-switch" title="切换工作模式 / 作品演示模式">
         <span class="mode-dot"></span><span id="modeLabel">工作模式</span>
       </div>
-      <button id="assistantBtn" class="topbar-btn" title="花姐助手">✦ 花姐助手</button>
+      <button id="assistantBtn" class="topbar-btn" type="button" title="花姐助手">✦ 花姐助手</button>
       <div class="user-chip">花姐</div>
     </div>
   </header>
@@ -44,6 +44,7 @@
       </div>
       <div class="nav-group">
         <div class="nav-item" data-view="resources"><span class="nav-ico">◈</span>工程师与职场</div>
+        <div class="nav-item" data-view="leave"><span class="nav-ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/><path d="M10 16h4"/></svg></span>休假与补位</div>
         <div class="nav-item" data-view="kpi"><span class="nav-ico">◬</span>KPI绩效</div>
         <div class="nav-item" data-view="reports"><span class="nav-ico">▤</span>交接与报表</div>
         <div class="nav-item" data-view="notes"><span class="nav-ico">📓</span>我的记录<span id="navBadgeNotes" class="nav-badge nav-badge-soft hidden">0</span></div>
@@ -62,6 +63,7 @@
       <div id="view-tasks" class="view hidden"></div>
       <div id="view-projects" class="view hidden"></div>
       <div id="view-resources" class="view hidden"></div>
+      <div id="view-leave" class="view hidden"></div>
       <div id="view-kpi" class="view hidden"></div>
       <div id="view-reports" class="view hidden"></div>
       <div id="view-notes" class="view hidden"></div>
@@ -84,12 +86,12 @@
   <div class="ap-head">
     <span class="ap-avatar">✦</span>
     <div><div class="ap-name">花姐助手</div><div class="ap-status">在线 · 已读取 67 个职场 / 9 名工程师</div></div>
-    <button id="apClose" class="ap-close">×</button>
+    <button id="apClose" class="ap-close" type="button" aria-label="关闭">×</button>
   </div>
   <div id="apBody" class="ap-body"></div>
   <div class="ap-input-row">
     <input id="apInput" type="text" placeholder="问我：湖州谁负责？今天有什么超时？…">
-    <button id="apSend" class="btn btn-primary btn-sm">发送</button>
+    <button id="apSend" class="btn btn-primary btn-sm" type="button">发送</button>
   </div>
 </div>
 

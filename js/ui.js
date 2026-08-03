@@ -38,34 +38,265 @@ UI.copy = async (text) => {
 UI.empty = (msg, col) => `<tr><td colspan="${col || 6}" class="tbl-empty">${msg}</td></tr>`;
 /** 清空告警按钮用轻量线性图标（清扫/归档感，非红色垃圾桶） */
 UI.ICON_CLEAR = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>`;
+/* ============================================================
+   统一弹窗栈（Modal Stack）
+   - 支持多层弹窗：每层独立 .modal-layer，自带遮罩，z-index 递增
+   - 关闭最上层不影响下层（下层输入内容保留，DOM 不销毁）
+   - 统一关闭接口：× / 取消 / 关闭 / 返回 / Esc / 遮罩点击
+   - 滚动锁定：栈非空时锁定 body，全部关闭后恢复
+   - 焦点管理：打开聚焦首输入，关闭归还焦点到打开按钮
+   - 未保存内容：编辑类弹窗通过 opts.onBeforeClose 判断，走统一确认
+   ============================================================ */
+UI.__stack = [];              // 每层 {layer, modal, mask, titleBtn, onBeforeClose, onClosed}
+UI.__dirtyMap = new WeakMap(); // modal 节点 -> dirty 判断函数
+UI.__openedBy = new WeakMap(); // modal 节点 -> 触发按钮（焦点归还）
+UI.__scrollPos = null;
+
+/** 打开一个弹窗层（压栈）。参数与旧 UI.modal 兼容。 */
 UI.modal = (title, bodyHTML, footHTML, opts) => {
   opts = opts || {};
   const root = document.getElementById('modalRoot');
-  root.innerHTML = `
+  root.classList.remove('hidden');
+
+  const layer = document.createElement('div');
+  layer.className = 'modal-layer';
+  layer.style.zIndex = 200 + UI.__stack.length * 10;
+  layer.innerHTML = `
+    <div class="modal-mask" data-mask></div>
     <div class="modal ${opts.size || ''}">
       <div class="modal-head"><div class="modal-title">${title}</div>
-      <button class="modal-close" data-close>×</button></div>
+      <button class="modal-close" type="button" aria-label="关闭" data-close>×</button></div>
       <div class="modal-body">${bodyHTML}</div>
       ${footHTML ? `<div class="modal-foot">${footHTML}</div>` : ''}
     </div>`;
-  root.classList.remove('hidden');
-  root.querySelector('[data-close]').onclick = () => UI.modalClose();
-  if (opts.onMount) opts.onMount(root);
+  root.appendChild(layer);
+
+  const modalEl = layer.querySelector('.modal');
+  const maskEl  = layer.querySelector('.modal-mask');
+  const headBtn = layer.querySelector('.modal-head [data-close]');
+  const topBtn  = UI.__lastTrigger && document.activeElement && document.body.contains(document.activeElement)
+    ? (document.activeElement.closest('[data-open],button') || null) : null;
+
+  const entry = {
+    layer, modal: modalEl, mask: maskEl, headBtn,
+    onBeforeClose: opts.onBeforeClose || null,
+    onClosed: opts.onClosed || null,
+    editable: !!opts.editable,
+    root,
+  };
+  UI.__stack.push(entry);
+
+  // —— 统一关闭逻辑 ——
+  const requestClose = (reason) => { UI.__requestClose(entry, reason); };
+
+  // 1. 绑定所有 [data-close]（head × / foot 取消 / body 取消 …）
+  layer.querySelectorAll('[data-close]').forEach((btn) => {
+    btn.setAttribute('type', 'button');
+    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); requestClose('close'); });
+  });
+  // 确保层内所有非提交按钮均为 type=button（无 <form>，防御性归一）
+  layer.querySelectorAll('button').forEach((b) => {
+    if (!b.getAttribute('type')) b.setAttribute('type', 'button');
+  });
+  // 2. 遮罩点击
+  maskEl.addEventListener('click', () => requestClose('mask'));
+  // 3. 内层面板点击不冒泡到遮罩
+  modalEl.addEventListener('click', (e) => e.stopPropagation());
+
+  // 焦点管理：打开后聚焦弹窗内第一个可输入元素（body 内 input/textarea/select）
+  if (!opts.noAutoFocus) {
+    const f = modalEl.querySelector('.modal-body input:not([type=hidden]), .modal-body textarea, .modal-body select');
+    if (f) setTimeout(() => { try { f.focus(); } catch (e) {} }, 30);
+  }
+
+  // 通用编辑类弹窗：记录初始快照，用于未保存内容判断
+  if (opts.editable) {
+    try {
+      entry.__snapshot = UI.__capture(entry);
+    } catch (e) { entry.__snapshot = null; }
+  }
+
+  if (opts.onMount) opts.onMount(root, layer);
+  UI.__syncScrollLock();
+  return entry;
 };
+
+/** 捕获弹窗内所有可输入控件的值快照 */
+UI.__capture = (entry) => {
+  const controls = entry.layer.querySelectorAll('.modal-body input, .modal-body textarea, .modal-body select');
+  const snap = {};
+  controls.forEach((el) => {
+    const key = el.name || el.id || ('k' + snapCount++);
+    snap[key] = el.value;
+  });
+  return snap;
+};
+let snapCount = 0;
+
+/** 通用未保存判断：当前值与初始快照不一致即为 dirty */
+UI.__isDirty = (entry) => {
+  if (!entry.__snapshot) return false;
+  try {
+    const now = UI.__capture(entry);
+    const keys = new Set([...Object.keys(entry.__snapshot), ...Object.keys(now)]);
+    for (const k of keys) {
+      if ((entry.__snapshot[k] || '') !== (now[k] || '')) return true;
+    }
+    return false;
+  } catch (e) { return false; }
+};
+
+/** 统一关闭请求：onBeforeClose 优先；否则通用 editable 未保存判断；否则直接关闭。
+ *  reason: 'close' | 'mask' | 'esc' | 'save'（save 跳过未保存拦截） */
+UI.__requestClose = (entry, reason) => {
+  const close = () => { UI.modalClose(); };
+  if (entry.onBeforeClose) {
+    entry.onBeforeClose(close, reason);
+  } else if (entry.editable && reason !== 'save' && UI.__isDirty(entry)) {
+    UI.confirmDiscard();
+    return;
+  } else {
+    close();
+  }
+};
+
+/** 关闭最上层弹窗。返回被关闭的层是否成功（未保存被拦截时返回 false）。 */
 UI.modalClose = () => {
-  document.getElementById('modalRoot').classList.add('hidden');
-  document.getElementById('modalRoot').innerHTML = '';
+  const entry = UI.__stack[UI.__stack.length - 1];
+  if (!entry) return true;
+  UI.__stack.pop();
+  const { layer, onClosed } = entry;
+  // 归还焦点到打开该层的按钮（若仍存在）
+  if (onClosed) { try { onClosed(); } catch (e) { console.error('[modal] onClosed error', e); } }
+  if (layer && layer.parentNode) layer.remove();
+  UI.__syncScrollLock();
+  UI.__focusLast(entry);
+  return true;
 };
-UI.confirm = (msg, onOk, okLabel) => {
+
+/** 关闭全部弹窗（供重置/切换等场景） */
+UI.modalCloseAll = () => {
+  while (UI.__stack.length) UI.modalClose();
+  const root = document.getElementById('modalRoot');
+  root.classList.add('hidden');
+  root.innerHTML = '';
+  UI.__syncScrollLock();
+};
+
+/** 同步 body 滚动锁定（栈空恢复滚动，保留滚动位置）。对测试 mock 环境容错。 */
+UI.__syncScrollLock = () => {
+  const body = document.body;
+  const root = document.getElementById('modalRoot');
+  try {
+    if (UI.__stack.length > 0) {
+      if (UI.__scrollPos === null) {
+        UI.__scrollPos = (typeof window !== 'undefined' && window.pageYOffset) || (document.documentElement && document.documentElement.scrollTop) || 0;
+      }
+      body.style.overflow = 'hidden';
+      body.style.position = 'fixed';
+      body.style.top = `-${UI.__scrollPos}px`;
+      body.style.width = '100%';
+    } else {
+      if (UI.__scrollPos !== null) {
+        if (typeof window !== 'undefined' && window.scrollTo) window.scrollTo(0, UI.__scrollPos);
+        UI.__scrollPos = null;
+      }
+      body.style.overflow = '';
+      body.style.position = '';
+      body.style.top = '';
+      body.style.width = '';
+    }
+    if (root) root.classList.toggle('hidden', UI.__stack.length === 0);
+  } catch (e) {
+    // 测试 mock 环境无完整 DOM 时静默跳过滚动锁定
+  }
+};
+
+/** 焦点归还到打开该层的按钮 */
+UI.__focusLast = (entry) => {
+  const trigger = UI.__openedBy.get(entry.modal);
+  if (trigger && document.body.contains(trigger)) {
+    try { trigger.focus({ preventScroll: true }); } catch (e) {}
+  }
+};
+
+/** 记录当前弹窗由哪个按钮打开（用于焦点归还） */
+UI.modalOpenedBy = (btn) => {
+  const top = UI.__stack[UI.__stack.length - 1];
+  if (top) UI.__openedBy.set(top.modal, btn);
+};
+
+/** 统一未保存内容确认弹窗。
+ *  继续编辑 → 关闭确认层，保留原弹窗输入与光标。
+ *  放弃并关闭 → 关闭原弹窗与确认层。
+ */
+UI.confirmDiscard = (dirtyMsg) => {
+  const baseLayer = UI.__stack[UI.__stack.length - 1];
+  if (!baseLayer) return;
+  UI.confirm(
+    `${dirtyMsg || '当前内容还没有保存，确定放弃吗？'}<div style="color:var(--text-3);font-size:12px;margin-top:4px">放弃后，本次未保存的修改不会保留。</div>`,
+    () => { UI.modalClose(); }, // 放弃并关闭：关闭最上层（此时最上层是确认框）
+    '放弃并关闭'
+  );
+  // 注意：确认框打开后成为新最上层；"继续编辑"按钮需二次绑定
+  const layer = UI.__stack[UI.__stack.length - 1];
+  if (layer) {
+    layer.onBeforeClose = null; // 确认框自身直接可关
+    const keepBtn = layer.layer.querySelector('.modal-foot .btn:not([data-close])');
+    // 追加"继续编辑"
+    const foot = layer.layer.querySelector('.modal-foot');
+    if (foot && !foot.querySelector('[data-keep]')) {
+      const k = document.createElement('button');
+      k.type = 'button'; k.className = 'btn btn-accent'; k.setAttribute('data-keep', '1');
+      k.textContent = '继续编辑';
+      foot.insertBefore(k, foot.firstChild);
+      k.addEventListener('click', () => {
+        // 只关闭确认层，保留原弹窗输入
+        UI.modalClose();
+      });
+    }
+  }
+};
+
+/** 确认框：通用确认弹窗（作为新层压栈，关闭不影响底层） */
+UI.confirm = (msg, onOk, okLabel, opts) => {
+  opts = opts || {};
+  const headClose = opts.allowHeadClose !== false;
   UI.modal('请确认', `<div style="padding:6px 2px">${msg}</div>`,
-    `<button class="btn" data-close>取消</button><button class="btn btn-danger" id="cfOk">${okLabel || '确认'}</button>`, {
+    `<button class="btn" type="button" data-close>取消</button><button class="btn btn-danger" id="cfOk" type="button">${okLabel || '确认'}</button>`, {
     size: 'modal-sm',
-    onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
-      root.querySelector('#cfOk').onclick = () => { UI.modalClose(); onOk(); };
+    noAutoFocus: true,
+    onMount(root, layer) {
+      const okBtn = layer.querySelector('#cfOk');
+      const cancelBtn = layer.querySelector('.modal-foot [data-close]');
+      if (okBtn) okBtn.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        // 先关确认层，再执行回调（回调内部可能再开弹窗）
+        const idx = UI.__stack.findIndex(x => x.layer === layer);
+        if (idx >= 0) UI.__stack.splice(idx, 1);
+        if (layer.parentNode) layer.remove();
+        UI.__syncScrollLock();
+        if (onOk) { try { onOk(); } catch (err) { console.error('[confirm] onOk error', err); } }
+      });
+      // 确认框的取消应只关闭确认层本身（不解散底层）
+      if (cancelBtn) cancelBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); UI.modalClose(); });
+      // head × 仅当允许时关闭
+      const headBtn = layer.querySelector('.modal-head [data-close]');
+      if (headBtn && !headClose) headBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); UI.modalClose(); });
     },
   });
 };
+
+/** 全局键盘：Esc 关闭最上层弹窗（尊重 onBeforeClose / 未保存判断） */
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' || e.key === 'Esc') {
+    const top = UI.__stack[UI.__stack.length - 1];
+    if (!top) return;
+    e.preventDefault();
+    e.stopPropagation();
+    UI.__requestClose(top, 'esc');
+  }
+});
 
 /* ================= 导航 ================= */
 UI.nav = (view, arg) => {
@@ -81,7 +312,8 @@ UI.nav = (view, arg) => {
 UI.renderView = (view, arg) => {
   const fns = {
     home: UI.renderHome, dispatch: UI.renderDispatch, tasks: UI.renderTasks,
-    projects: UI.renderProjects, resources: UI.renderResources, kpi: UI.renderKpi,
+    projects: UI.renderProjects, resources: UI.renderResources, leave: UI.renderLeave,
+    kpi: UI.renderKpi,
     reports: UI.renderReports, notes: UI.renderNotes, import: UI.renderImport, settings: UI.renderSettings,
     about: UI.renderAbout,
   };
@@ -147,15 +379,13 @@ UI.renderHome = () => {
   const quickCards = [
     { icon: '📋', label: '新建派单', sub: '30秒搞定', primary: true, act: 'UI.dispatchCreate()' },
     { icon: '📝', label: '快速记录', sub: '先记下来，别让它溜走', act: 'UI.quickNote()' },
-    { icon: '🔍', label: '查资源', sub: '10秒找到人', act: 'UI.resourcesJump()' },
+    { icon: '🗓️', label: '登记休假', sub: '记休假，补位不遗漏', lavender: true, act: 'UI.leaveCreate()' },
     { icon: '🔄', label: '更新进度', sub: '补一句反馈', act: 'UI.taskCreate(true)' },
     { icon: '📊', label: '登记KPI', sub: '加分扣分都留痕', act: 'UI.kpiEventCreate()' },
     { icon: '📄', label: '生成交接', sub: '一键整理今日', act: 'UI.handoverToday()' },
-    { icon: '🖨️', label: '收到耗材提醒', sub: '记一条跟进', act: "UI.triggerFixed('TPL005')" },
-    { icon: '🔐', label: '记录登录失败告警', sub: '安全告警跟进', act: "UI.triggerFixed('TPL006')" },
   ];
   const quickCardsHTML = quickCards.map(q => 
-    `<a class="quick-card ${q.primary ? 'qc-primary' : ''}" href="javascript:void(0)" onclick="${q.act}">
+    `<a class="quick-card ${q.primary ? 'qc-primary' : ''}${q.lavender ? ' qc-lavender' : ''}" href="javascript:void(0)" onclick="${q.act}">
       <span class="qc-icon">${q.icon}</span>
       <div class="qc-text">
         <div class="qc-label">${q.label}</div>
@@ -401,7 +631,7 @@ UI.leaveTodayDetail = () => {
     : '<div class="fc-empty"><div class="fc-empty-icon">🙂</div><div class="fc-empty-text">今日无休假安排，工程师均在岗</div></div>';
 
   UI.modal('今日休假详情', body, `<button class="btn" data-close>关闭</button>`, {
-    onMount(root) { root.querySelector('[data-close]').onclick = () => UI.modalClose(); },
+    onMount() {},
   });
 };
 
@@ -545,8 +775,20 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
       </div>
     </div>`;
 
+  // 未保存内容判断：供 onBeforeClose 使用（成功页不拦截）
+  const modalState = { edited: false };
+  const isEdited = () => modalState.edited;
+
   UI.modal('新建派单', body, '', {
     size: 'modal-dispatch',
+    onBeforeClose(close, reason) {
+      // 编辑视图且已输入内容 → 走未保存确认
+      if (reason !== 'save' && isEdited()) {
+        UI.confirmDiscard('当前派单还没有生成，确定放弃吗？');
+        return; // 不直接关闭，等待用户选择
+      }
+      close();
+    },
     onMount(root) {
       const searchInput  = root.querySelector('#dpSiteSearch');
       const descInput   = root.querySelector('#dpDesc');
@@ -573,6 +815,7 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
 
       const pickSite = (s) => {
         pickedSite = s;
+        modalState.edited = true;
         addRecent(s);
         searchInput.value = NK.v.siteName(s.name);
 
@@ -689,9 +932,11 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
       });
 
       const checkSubmit = () => {
+        if (descInput.value.trim()) modalState.edited = true;
         submitBtn.disabled = !(pickedSite && descInput.value.trim());
       };
       descInput.addEventListener('input', checkSubmit);
+      arriveInput.addEventListener('input', () => { if (arriveInput.value) modalState.edited = true; });
 
       descInput.addEventListener('keydown', (e) => {
         if (e.ctrlKey && e.key === 'Enter' && !submitBtn.disabled) {
@@ -738,6 +983,7 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
         }
 
         wrap.classList.add('hidden');
+        modalState.edited = false; // 已保存，成功页关闭不拦截
         root.querySelector('#dpSuccessTitle').textContent =
           `花姐，${NK.v.siteName(pickedSite.name)}的派单已经生成 ✓`;
         root.querySelector('#dpSuccessSub').textContent =
@@ -761,7 +1007,7 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
         };
       };
 
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
 
       // 补位派单：若传入了 siteId，自动选中该职场并预填
       if (siteId) {
@@ -849,7 +1095,7 @@ UI.dispatchDetail = (id) => {
   UI.modal(`派单详情`, body, foot, {
     size: 'modal-lg',
     onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
       const b1 = root.querySelector('#ddFeedback');
       if (b1) b1.onclick = () => UI.dispatchFeedback(d.id);
       const b2 = root.querySelector('#ddUrgent');
@@ -894,8 +1140,9 @@ UI.dispatchFeedback = (id) => {
       <input type="datetime-local" id="fbNextTime" style="display:none;margin-top:6px;width:100%;box-sizing:border-box;font-size:13px">
     </div>`;
   UI.modal('记录进展', body, `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="fbOk">保存</button>`, {
+    editable: true,
     onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
       // 快速状态按钮
       root.querySelectorAll('.qs-btn[data-qs]').forEach(btn => {
         btn.onclick = () => {
@@ -963,7 +1210,7 @@ UI.dispatchUrgent = (id) => {
     <p style="margin-top:8px;font-size:11px;color:var(--text-3)">复制后发到微信或 Teams，花姐发出去后我会记住这次催办时间。</p>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-warn" id="urOk">复制并记录</button>`, {
     onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
       root.querySelector('#urOk').onclick = async () => {
         await UI.copy(msg);
         NK.save();
@@ -988,7 +1235,7 @@ UI.dispatchAccept = (id) => {
     </div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="acOk">确认验收</button>`, {
     onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
       root.querySelector('#acOk').onclick = () => {
         const pass = root.querySelector('#acResult').value.includes('通过');
         const note = root.querySelector('#acNote').value;
@@ -1022,7 +1269,7 @@ UI.dispatchClose = (id) => {
     </div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-success" id="clOk">确认闭环</button>`, {
     onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
       root.querySelector('#clOk').onclick = () => {
         const note = root.querySelector('#clNote').value.trim();
         NK.updateDispatchFeedback(d, {
@@ -1201,7 +1448,7 @@ UI.renderTasks = () => {
   const typeOpts = ['全部', ...NK.TASK_TYPES];
   const srcOpts = ['全部', '系统固定任务', '花姐手动新增', '安全告警', '派单自动关联', '专项任务', '已完成'];
   el.innerHTML = UI.pageHead('任务与告警', '任务闭环 · 告警驱动 · 固定任务每日/月度自动生成',
-    `<button class="btn btn-accent" onclick="UI.taskCreate()">✚ 新建任务</button>`) +
+    `<button class="btn" onclick="UI.triggerFixed('TPL005')">🖨️ 收到耗材提醒</button><button class="btn btn-accent" onclick="UI.taskCreate()">✚ 新建任务</button>`) +
     `<div class="filter-bar">
       <input class="fb-input" id="tkQ" placeholder="搜索编号/名称/职场/工程师…" value="${NK.esc(f.q || '')}">
       <select class="fb-select" id="tkStatus">${statusOpts.map(s => `<option ${(f.status || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
@@ -1293,7 +1540,7 @@ UI.alertClearStart = () => {
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="alClearOk">确认清空</button>`, {
       size: 'modal-sm',
       onMount(root) {
-        root.querySelector('[data-close]').onclick = () => UI.modalClose();
+        // [close] 已由统一弹窗机制绑定
         root.querySelector('#alClearOk').onclick = () => UI.alertClearDo('all');
       },
     });
@@ -1333,7 +1580,7 @@ UI.alertRecordsOpen = () => {
       }).join('')
     : `<div class="tbl-empty" style="padding:24px">暂无清空记录。清空告警后，这里会保留每次清空的留痕。</div>`;
   UI.modal('清空记录', `<div class="al-records">${body}</div>`,
-    `<button class="btn" data-close>关闭</button>`, { size: 'modal', onMount(r) { r.querySelector('[data-close]').onclick = () => UI.modalClose(); } });
+    `<button class="btn" data-close>关闭</button>`, { size: 'modal' });
 };
 
 /** 打开「冷却时间设置」弹窗 */
@@ -1353,7 +1600,7 @@ UI.alertCooldownOpen = () => {
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="alCoolOk">保存</button>`, {
       size: 'modal-sm',
       onMount(root) {
-        root.querySelector('[data-close]').onclick = () => UI.modalClose();
+        // [close] 已由统一弹窗机制绑定
         root.querySelector('#alCoolOk').onclick = () => {
           const v = Math.max(0, Math.min(168, parseInt(document.getElementById('alCool').value || '2', 10) || 0));
           state.cooldownHours = v;
@@ -1395,6 +1642,7 @@ UI.taskCreate = (updateMode) => {
     </div>
     <div class="form-item"><label>处理要求 / 下一步</label><textarea id="tcNext" placeholder="任务要求、验收标准等"></textarea></div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="tcOk">创建任务</button>`, {
+    editable: true,
     onMount(root) {
       const siteQ = root.querySelector('#tcSiteQ');
       const siteList = root.querySelector('#tcSiteList');
@@ -1459,9 +1707,18 @@ UI.quickNote = () => {
       </div>
       <textarea id="qnContent" class="qn-content" placeholder="会议内容、电话记录、临时安排、工作想法……先记下来再说。">${draft && draft.content ? NK.esc(draft.content) : ''}</textarea>
     </div>`,
-    `<button class="btn" onclick="UI.modalClose()">取消</button><button class="btn btn-accent" id="qnSave">保存记录</button>`,
+    `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="qnSave">保存记录</button>`,
     {
       size: 'modal-note',
+      onBeforeClose(close, reason) {
+        // 快速记录已有自动草稿能力：关闭时若仍有未保存输入，自动落草稿（不重复创建）
+        try {
+          const t = document.getElementById('qnTitle').value;
+          const c = document.getElementById('qnContent').value;
+          if (t || c) NK.saveDraft({ title: t, content: c });
+        } catch (e) { /* 草稿保存失败则静默，交由普通关闭 */ }
+        close();
+      },
       onMount(root) {
         // 自动草稿保存：停止输入2秒后
         let timer;
@@ -1489,15 +1746,6 @@ UI.quickNote = () => {
         document.getElementById('qnTitle').addEventListener('keydown', onKey);
         // 保存
         document.getElementById('qnSave').onclick = UI.quickNoteSave;
-        // 关闭时检查草稿
-        root.querySelector('[data-close]').addEventListener('click', () => {
-          clearTimeout(timer);
-          const t = document.getElementById('qnTitle').value;
-          const c = document.getElementById('qnContent').value;
-          if (t || c) {
-            NK.saveDraft({ title: t, content: c });
-          }
-        });
       }
     }
   );
@@ -1775,7 +2023,7 @@ UI.notesEdit = (id) => {
     <div class="qn-toolbar"><button class="qn-tpl-btn" onclick="UI.quickNoteInsertTpl()">📋 插入会议纪要模板</button></div>
     <textarea id="qnContent" class="qn-content" placeholder="会议内容、电话记录、临时安排、工作想法……先记下来再说。">${NK.esc(n.content)}</textarea>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="qnSave">保存</button>`,
-    { size: 'modal-note', onMount(root) {
+    { size: 'modal-note', editable: true, onMount(root) {
       const cont = document.getElementById('qnContent');
       cont.focus(); cont.selectionStart = cont.selectionEnd = cont.value.length;
       const onKey = (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') document.getElementById('qnSave').click(); };
@@ -1978,6 +2226,7 @@ UI.taskFeedback = (id) => {
     <div class="form-item"><label>最新反馈 *</label><textarea id="tfContent" placeholder="处理进展、遇到的问题…">${NK.esc(t.latestFeedback || '')}</textarea></div>
     <div class="form-item"><label>下一步计划</label><input id="tfNext" value="${NK.esc(t.nextAction || '')}"></div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="tfOk">保存反馈</button>`, {
+    editable: true,
     onMount(root) {
       root.querySelector('#tfOk').onclick = () => {
         const st = root.querySelector('#tfStatus').value;
@@ -2103,6 +2352,7 @@ UI.projectCreate = (quarter) => {
     ${quarter ? `<div class="hint">将自动生成 ${inspect.length} 项巡检子任务（机房检查/监管机检查/巡检单提交等）</div>` : ''}
     <div class="form-item"><label>验收要求</label><input id="pjAccept" placeholder="如：全部子任务完成并附照片">`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="pjOk">创建专项</button>`, {
+    editable: true,
     onMount(root) {
       root.querySelector('#pjOk').onclick = () => {
         const name = root.querySelector('#pjName').value.trim();
@@ -2591,6 +2841,7 @@ UI.siteAdd = () => {
     <div class="form-item"><label>默认工程师</label><select id="saEng"><option value="">未指定</option>${NK.db.engineers.map(e => `<option value="${NK.esc(e.name)}">${NK.esc(NK.v.engName(e.name))}</option>`).join('')}</select></div>
     <div class="form-item"><label>备注</label><textarea id="saRemark" placeholder="职场备注、撤场计划等"></textarea></div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="saOk">创建职场</button>`, {
+    editable: true,
     onMount(root) {
       root.querySelector('#saOk').onclick = () => {
         const name = root.querySelector('#saName').value.trim();
@@ -2692,6 +2943,7 @@ UI.engAdd = () => {
     <div class="form-item"><label>驻场区域（多个用、分隔）</label><input id="eaOnsite" placeholder="如：湖州、上海"></div>
     <div class="form-item"><label>远程支持区域</label><input id="eaRemote" placeholder="如：南京、苏州"></div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="eaOk">创建工程师</button>`, {
+    editable: true,
     onMount(root) {
       root.querySelector('#eaOk').onclick = () => {
         const name = root.querySelector('#eaName').value.trim();
@@ -2721,26 +2973,35 @@ UI.leaveStatusBadge = (st) => {
   const map = {
     '无需派单': 'ok', '已创建派单': 'done', '待创建派单': 'warn', '未判断': 'gray', '已取消': 'gray',
   };
-  return `<span class="badge ${map[st] || 'gray'}">${st}</span>`;
+  const label = st === '已创建派单' ? '已安排补位' : st;
+  return `<span class="badge ${map[st] || 'gray'}">${label}</span>`;
 };
 
 /** 休假记录列表 */
 UI.renderLeaveRecords = (body) => {
-  const f = NK.leaveFilter = NK.leaveFilter || { scope: 'all' };
-  const scope = f.scope || 'all';
+  const f = NK.leaveFilter = NK.leaveFilter || { scope: '全部' };
+  const scope = f.scope || '全部';
   const today = NK.today();
   const month = today.slice(0, 7);
   let list = [...NK.db.leaves].sort((a, b) => b.startDate.localeCompare(a.startDate) || b.createdAt.localeCompare(a.createdAt));
   if (scope === '今天') list = list.filter(l => l.recordStatus === '有效' && NK.leavesOnDate(today).some(x => x.leaveId === l.leaveId));
   else if (scope === '明天') list = list.filter(l => l.recordStatus === '有效' && NK.leavesTomorrow().some(x => x.leaveId === l.leaveId));
   else if (scope === '本月') list = list.filter(l => l.startDate.slice(0, 7) === month || l.endDate.slice(0, 7) === month);
+  else if (scope === '待安排补位') list = list.filter(l => l.recordStatus === '有效' && l.dispatchStatus === '待创建派单');
 
-  const scopes = ['全部', '今天', '明天', '本月'];
+  const scopes = ['全部', '今天', '明天', '本月', '待安排补位'];
   const rows = list.map(l => {
     const vName = NK.v.engName(l.engineerName);
     const sitesLabel = (l.responsibleSitesSnapshot || []).map(s => NK.v.siteName(s.siteName)).join('、') || '—';
     const days = NK.daysBetween(l.startDate, l.endDate) + 1;
     const linked = l.relatedDispatchId ? NK.getDispatch(l.relatedDispatchId) : null;
+    const actBtns = [
+      `<button class="btn btn-sm" onclick="UI.leaveDetail('${l.leaveId}')">查看</button>`,
+      l.recordStatus === '有效' ? `<button class="btn btn-sm" onclick="UI.leaveEdit('${l.leaveId}')">编辑</button>` : '',
+      l.recordStatus === '有效' && l.dispatchStatus === '待创建派单' ? `<button class="btn btn-sm btn-accent" onclick="UI.leaveCreateDispatch('${l.leaveId}')">创建补位派单</button>` : '',
+      linked ? `<button class="btn btn-sm" onclick="UI.dispatchDetail('${linked.id}')">查看关联派单</button>` : '',
+      l.recordStatus === '有效' ? `<button class="btn btn-sm btn-danger" onclick="UI.leaveCancel('${l.leaveId}')">取消休假</button>` : '',
+    ].filter(Boolean).join('');
     return `<tr>
       <td><div style="font-weight:600">${NK.esc(vName)}</div>${l.recordStatus === '已取消' ? '<div style="font-size:10px;color:var(--text-3)">已取消</div>' : ''}</td>
       <td>${NK.esc(l.startDate)}<div class="num" style="font-size:11px">${l.endDate !== l.startDate ? '至 ' + NK.esc(l.endDate) : ''}</div></td>
@@ -2749,17 +3010,14 @@ UI.renderLeaveRecords = (body) => {
       <td>${UI.leaveStatusBadge(l.dispatchStatus)}</td>
       <td>${linked ? `<a href="javascript:void(0)" onclick="UI.dispatchDetail('${linked.id}')">${NK.esc(linked.no)}</a>` : (l.dispatchStatus === '待创建派单' ? `<button class="btn btn-sm btn-accent" onclick="UI.leaveCreateDispatch('${l.leaveId}')">去创建</button>` : '—')}</td>
       <td>${l.remark ? `<span title="${NK.esc(l.remark)}">${NK.esc(String(l.remark).slice(0, 12))}${String(l.remark).length > 12 ? '…' : ''}</span>` : '—'}</td>
-      <td style="white-space:nowrap">
-        <button class="btn btn-sm" onclick="UI.leaveDetail('${l.leaveId}')">查看</button>
-        ${l.recordStatus === '有效' ? `<button class="btn btn-sm" onclick="UI.leaveEdit('${l.leaveId}')">编辑</button>` : ''}
-      </td>
+      <td style="white-space:nowrap">${actBtns}</td>
     </tr>`;
   }).join('');
 
   body.innerHTML = `
     <div class="leave-toolbar">
       <div class="leave-scopes">
-        ${scopes.map(s => `<button class="res-tab${scope === s ? ' active' : ''}" onclick="NK.leaveFilter.scope='${s}';UI.renderLeaveRecords(document.getElementById('resTabBody'))">${s}</button>`).join('')}
+        ${scopes.map(s => `<button class="res-tab${scope === s ? ' active' : ''}" onclick="NK.leaveFilter.scope='${s}';UI.renderLeaveRecords(document.getElementById('${body.id}'))">${s}</button>`).join('')}
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-accent" onclick="UI.leaveCreate()">＋ 登记休假</button>
@@ -2771,8 +3029,25 @@ UI.renderLeaveRecords = (body) => {
     </table></div></div>`;
 };
 
+/** 独立「休假与补位」管理页面（左侧一级菜单） */
+UI.renderLeave = () => {
+  const el = document.getElementById('view-leave');
+  el.innerHTML = UI.pageHead('工程师休假与补位管理', '记录工程师休假安排，及时确认驻场支持是否需要补位。',
+    `<button class="btn btn-accent" onclick="UI.leaveCreate()">＋ 登记休假</button>`) +
+    `<div id="leaveTabBody"></div>`;
+  UI.renderLeaveRecords(document.getElementById('leaveTabBody'));
+};
+
+/** 休假数据变更后，刷新当前所在页面（独立休假页 或 工程师页内的休假记录页签） */
+UI.refreshLeaveView = () => {
+  if (NK.currentView === 'leave') { UI.renderLeave(); return; }
+  if (NK.currentView === 'resources') { UI.renderResources(); return; }
+  UI.nav('leave');
+};
+
 /** 登记休假弹窗（极简表单 + 是否需要派单判断） */
 UI.leaveCreate = (prefillEngName) => {
+  let initSnapshot = null;
   const engOpts = NK.db.engineers.map(e => `<option value="${NK.esc(e.id)}" ${prefillEngName && e.name === prefillEngName ? 'selected' : ''}>${NK.esc(NK.v.engName(e.name))}</option>`).join('');
   const today = NK.today();
   const body = `
@@ -2799,7 +3074,22 @@ UI.leaveCreate = (prefillEngName) => {
     </div>`;
   UI.modal('登记休假', body,
     `<button class="btn" data-close>取消</button>`,
-    { size: 'modal-md', onMount(root) {
+    { size: 'modal-md',
+      onBeforeClose(close, reason) {
+        try {
+          const g = (id) => { const el = document.getElementById(id); return el ? el.value : ''; };
+          const now = { eng: g('lvEng'), s: g('lvStart'), e: g('lvEnd'), p: g('lvPeriod'), r: document.getElementById('lvRemark') ? document.getElementById('lvRemark').value : '' };
+          const same = now.eng === initSnapshot.eng && now.s === initSnapshot.s && now.e === initSnapshot.e && now.p === initSnapshot.p && now.r === initSnapshot.r;
+          if (!same) { UI.confirmDiscard('当前休假登记还没有保存，确定放弃吗？'); return; }
+        } catch (e) {}
+        close();
+      },
+      onMount(root) {
+      // 记录初始快照（未保存判断基准）
+      initSnapshot = (() => {
+        const g = (id) => { const el = document.getElementById(id); return el ? el.value : ''; };
+        return { eng: g('lvEng'), s: g('lvStart'), e: g('lvEnd'), p: g('lvPeriod'), r: document.getElementById('lvRemark') ? document.getElementById('lvRemark').value : '' };
+      })();
       UI.leaveEngChanged();
       UI.leaveDateChanged();
       root.querySelector('#lvNeedDispatch').onclick = () => UI.leaveSave(true, root);
@@ -2873,7 +3163,7 @@ UI.leaveSave = (needDispatch, root) => {
   if (!rec) { UI.toast('保存失败，请重试', 'warn'); return; }
   UI.modalClose();
   UI.toast('花姐，休假记录已经记下来了。🌴');
-  UI.renderResources();
+  UI.refreshLeaveView();
   if (needDispatch) {
     // 2) 需要派单：跳转到现有派单页面并预填该工程师的职场与补位原因
     UI.leaveCreateDispatch(rec.leaveId);
@@ -2964,6 +3254,7 @@ UI.leaveEdit = (leaveId) => {
     ${l.relatedDispatchId ? `<div class="hint" style="color:var(--warn)">该记录已关联补位派单 ${NK.esc(l.relatedDispatchNo || '')}。休假时间调整后，请确认关联补位派单是否也需要修改。</div>` : ''}`;
   UI.modal('编辑休假', body,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="leOk">保存</button>`, {
+    editable: true,
     onMount(root) {
       root.querySelector('#leOk').onclick = () => {
         const start = root.querySelector('#leStart').value;
@@ -2988,7 +3279,7 @@ UI.leaveEdit = (leaveId) => {
         });
         UI.modalClose();
         UI.toast('花姐，休假记录已更新 ✓');
-        UI.renderResources();
+        UI.refreshLeaveView();
       };
     },
   });
@@ -3007,7 +3298,7 @@ UI.leaveCancel = (leaveId) => {
         UI.confirm(`该休假已关联补位派单 ${NK.esc(linked.no)}。补位派单不会自动删除，请自行确认该派单是否仍然需要。`, () => {}, '我知道了');
       }
       UI.toast('花姐，休假已取消。');
-      UI.renderResources();
+      UI.refreshLeaveView();
     }, '确定取消');
 };
 
@@ -3117,6 +3408,7 @@ UI.kpiEventCreate = () => {
     <div class="form-item"><label>原因说明 *</label><textarea id="keReason" placeholder="具体经过、影响…"></textarea></div>
     <div class="form-item"><label>证据（可选）</label><input id="keEvidence" placeholder="如：聊天截图/工单号/照片"></div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="keOk">登记事件</button>`, {
+    editable: true,
     onMount(root) {
       const itemSel = root.querySelector('#keItem');
       const ptsInp = root.querySelector('#kePts');
@@ -3875,6 +4167,32 @@ UI.init = () => {
     document.body.appendChild(b);
   }
   document.getElementById('modeSwitch').onclick = () => UI.toggleMode();
+
+  // —— 全站按钮类型归一：确保非提交按钮均为 type="button" ——
+  // 本应用无 <form>，按钮默认 type 为 submit 不会触发表单提交，
+  // 但为满足「非提交按钮必须 type='button'」的验收要求，统一归一化。
+  // 通过 MutationObserver 覆盖 #main 视图与 #modalRoot 弹窗的后续动态按钮。
+  UI.__normalizeButtons = (scope) => {
+    (scope || document).querySelectorAll('button').forEach((b) => {
+      if (!b.getAttribute('type')) b.setAttribute('type', 'button');
+    });
+  };
+  if (typeof MutationObserver !== 'undefined') {
+    UI.__btnObserver = new MutationObserver((muts) => {
+      for (const m of muts) {
+        m.addedNodes.forEach((n) => {
+          if (n.nodeType !== 1) return;
+          if (n.tagName === 'BUTTON' && !n.getAttribute('type')) n.setAttribute('type', 'button');
+          else UI.__normalizeButtons(n);
+        });
+      }
+    });
+    const mainEl = document.getElementById('main');
+    const modalEl2 = document.getElementById('modalRoot');
+    if (mainEl) UI.__btnObserver.observe(mainEl, { childList: true, subtree: true });
+    if (modalEl2) UI.__btnObserver.observe(modalEl2, { childList: true, subtree: true });
+  }
+  UI.__normalizeButtons(document);
   // 每日任务与首屏
   NK.ensureFixedTasks();
   NK.save();

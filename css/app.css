@@ -108,11 +108,13 @@ a { color: var(--primary-light); }
   width: 200px; background: var(--panel); border-right: 1px solid var(--border);
   display: flex; flex-direction: column; padding: 10px 8px; flex-shrink: 0; overflow: auto;
 }
-.nav-group { margin-bottom: 6px; }
-.nav-bottom { margin-top: auto; border-top: 1px solid var(--border); padding-top: 8px; }
+.nav-group { margin-bottom: 4px; }
+/* 模块间浅色分隔线（底部组同样适用，统一样式） */
+.nav-group + .nav-group { border-top: 1px solid var(--border); padding-top: 6px; }
+.nav-bottom { margin-top: auto; }
 .nav-item {
-  display: flex; align-items: center; padding: 15px 18px 15px 24px; border-radius: 8px;
-  color: var(--text-2); cursor: pointer; font-size: 13px; margin-bottom: 2px; transition: background .12s;
+  display: flex; align-items: center; padding: 12px 18px 12px 24px; border-radius: 8px;
+  color: var(--text-2); cursor: pointer; font-size: 13px; margin-bottom: 1px; transition: background .12s;
   user-select: none;
 }
 /* 侧边栏 Emoji 图标区：固定宽度对齐，Emoji 垂直居中，无底座无外框 */
@@ -710,7 +712,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 }
 @media (max-width: 900px) {
   #sidebar { width: 56px; padding: 10px 4px; }
-  .nav-item { justify-content: center; padding: 15px 0; }
+  .nav-item { justify-content: center; padding: 12px 0; }
   .nav-item .nav-ico { margin-right: 0; }
   .nav-item span:not(.nav-ico) { display: none; }
   .brand-text { display: none; }

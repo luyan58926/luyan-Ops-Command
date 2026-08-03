@@ -141,6 +141,7 @@
     const tasks = (NK.db.tasks || []).filter(t => {
       if (t.status === '已完成' && !opts.includeDone) return false;
       if (t.status === '已取消') return false;
+      if (!NK.taskActive(t)) return false; // 关联派单已撤销/删除或任务已删除 → 不作为当前有效工作
       return true;
     });
     const score = (t) => {
@@ -614,14 +615,14 @@
   A.q_todo = () => {
     const rem = NK.genReminders();
     const blocks = [];
-    const daily = (NK.db.tasks || []).filter(t => t.status === '待处理' && t.templateId && NK.FIXED_DAILY().some(x => x.id === t.templateId));
+    const daily = (NK.db.tasks || []).filter(t => NK.taskActive(t) && t.status === '待处理' && t.templateId && NK.FIXED_DAILY().some(x => x.id === t.templateId));
     const projPending = (NK.db.projects || []).filter(p => p.status === '未开始' || p.status === '进行中');
     const disp = (NK.db.dispatches || []).filter(d => {
       const k = NK.dispatchStatusKey(d);
       return k === 'pending_send' || k === 'exception';
     });
     const leave = NK.leavesToday();
-    const manual = (NK.db.tasks || []).filter(t => t.status === '待处理' && !t.templateId);
+    const manual = (NK.db.tasks || []).filter(t => NK.taskActive(t) && t.status === '待处理' && !t.templateId);
 
     if (daily.length) blocks.push(`未完成日常（${daily.length} 项）：${daily.slice(0, 5).map(t => t.name).join('；')}`);
     if (projPending.length) blocks.push(`需推进专项（${projPending.length} 项）：${projPending.slice(0, 4).map(p => p.name).join('；')}`);
@@ -686,7 +687,7 @@
   A.q_overview = () => {
     const rem = NK.genReminders();
     const urgent = rem.filter(x => x.level === 'danger');
-    const disps = NK.db.dispatches;
+    const disps = (NK.db.dispatches || []).filter(d => !NK.dispatchInactive(d));
     return [{
       text: `花姐，今天共 ${rem.length} 项提醒：P1/超时 ${urgent.length} 项、待发送 ${disps.filter(d => NK.dispatchStatusKey(d) === 'pending_send').length} 项、异常待处理 ${disps.filter(d => NK.dispatchStatusKey(d) === 'exception').length} 项。${urgent.length ? '\n优先级最高：' + urgent.slice(0, 3).map(u => u.title).join('；') : '\n今天没有超时事项 ✨'}`,
       actions: urgent.length ? [{ label: '查看实时告警', act: 'nav', arg: 'tasks' }] : undefined,
@@ -701,8 +702,9 @@
     const supplier = intent.supplier || '';
     const label = intent._rangeLabel || (vs && ve && vs === ve ? vs : (vs || ve) ? (vs || '…') + '至' + (ve || '…') : '全部');
     let list = NK.db.dispatches || [];
-    // 默认排除已删除
+    // 默认排除已删除；未显式指定状态时，默认排除已撤销/已取消的派单（不作为当前有效工作），仅当用户明确查询该类状态时才展示
     list = list.filter(d => d.recordStatus !== '已删除');
+    if (!status) list = list.filter(d => !NK.dispatchInactive(d));
     // 日期范围（共享逻辑）
     list = NK.filterByVisitRange(list, vs, ve);
     // 供应商（共享逻辑）
@@ -857,7 +859,7 @@
   A.x_complete_daily_all = (intent, confirm) => {
     const today = A.today();
     const pending = (NK.db.tasks || []).filter(t =>
-      t.status === '待处理' && t.templateId && NK.FIXED_DAILY().some(x => x.id === t.templateId) && t.fixedDate === today);
+      NK.taskActive(t) && t.status === '待处理' && t.templateId && NK.FIXED_DAILY().some(x => x.id === t.templateId) && t.fixedDate === today);
     if (!pending.length) return [{ text: '花姐，今天没有需要完成的日常任务了 ✨' }];
     if (!confirm) {
       // 未确认：列出影响范围

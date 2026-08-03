@@ -143,19 +143,24 @@ ok(run(`NK.db.dispatches.find(x=>x.id==='${d3}').recordStatus !== '已删除'`),
 r = run(`NK.softDeleteDispatch('${d3}', { force: true })`);
 ok(r.ok === true, 'force 强制删除可行（二次确认兜底）');
 
-console.log('== 场景四：撤销时关联任务处理 ==');
+console.log('== 场景四：撤销时关联任务处理（同步核心）==');
 reset();
 const d4 = mkDispatch({ title: '关联任务单独保留' });
-// 撤销但不同时取消任务
+// 关联任务已创建且带派单关联标记
+ok(run(`(() => { const t = NK.db.tasks.find(t=>t.dispatchId==='${d4}'||(t.sourceType==='dispatch'&&t.sourceId==='${d4}')); return !!t && t.sourceType==='dispatch' && t.sourceId==='${d4}'; })()`), '创建派单的关联任务带 sourceType/sourceId 关联');
+// 撤销：无论 cancelTask 如何，关联任务一律同步置为"已取消"，且保留关联
 r = run(`NK.revokeDispatch('${d4}', { reason: '计划调整', cancelTask: false })`);
-ok(r.taskCancelled === false, 'cancelTask=false 时任务不取消');
-ok(run(`NK.db.tasks.some(t=>t.id && t.name === '关联任务单独保留' && t.status !== '已取消')`), '任务保留且未取消');
-ok(run(`!NK.db.tasks.some(t=>t.dispatchId==='${d4}')`), '撤销后任务解绑派单关联');
+ok(r.ok === true, '撤销成功');
+ok(r.taskCancelled === true, '撤销时关联任务被取消（无论 cancelTask）');
+ok(run(`NK.db.tasks.find(t=>t.id && (t.dispatchId==='${d4}'||(t.sourceType==='dispatch'&&t.sourceId==='${d4}')))?.status === '已取消'`), '关联任务状态=已取消');
+ok(run(`NK.db.tasks.some(t=>t.dispatchId==='${d4}' || (t.sourceType==='dispatch'&&t.sourceId==='${d4}'))`), '撤销后关联任务保留且不解除派单关联');
+ok(run(`NK.db.tasks.filter(t=>(t.dispatchId==='${d4}'||(t.sourceType==='dispatch'&&t.sourceId==='${d4}'))).every(t=>!NK.taskActive(t))`), '撤销后关联任务全部不可见（非当前有效工作）');
 // 恢复已撤销派单
 r = run(`NK.unrevokeDispatch('${d4}')`);
 ok(r.ok === true, '恢复已撤销派单成功');
 ok(run(`NK.dispatchStatusKey(NK.db.dispatches.find(x=>x.id==='${d4}')) === 'pending_send'`), '恢复后 status=pending_send(待发送)');
 ok(run(`NK.dispatchActive(NK.db.dispatches.find(x=>x.id==='${d4}'))`), '恢复后重新为正常派单');
+ok(run(`NK.db.tasks.filter(t=>t.dispatchId==='${d4}'||(t.sourceType==='dispatch'&&t.sourceId==='${d4}')).every(t=>NK.taskActive(t))`), '恢复派单后关联任务重新为有效工作');
 // 已撤销派单撤销操作被拒绝
 run(`NK.revokeDispatch('${d4}', { reason: '重复', cancelTask: true })`);
 r = run(`NK.revokeDispatch('${d4}', { reason: '重复', cancelTask: true })`);

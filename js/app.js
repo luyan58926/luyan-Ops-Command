@@ -218,6 +218,7 @@ NK.initDB = () => {
     NK.db.assistantOps = NK.db.assistantOps || [];
     NK.mode = saved.mode === 'demo' ? 'demo' : 'work';
     NK.migrateFixedTasks();   // 固定任务升级 + 清理旧演示/预置数据（幂等）
+    NK.migrateDispatchTaskSync(); // 派单关联任务同步（去重 + 状态对齐，幂等）
     NK.ensureFixedTasks();    // 生成今日/本月应出现的固定任务实例
     NK.save();
     return;
@@ -493,10 +494,12 @@ NK.search = (q) => {
     }
   });
   NK.db.dispatches.forEach(d => {
+    if (NK.dispatchInactive(d)) return; // 已撤销/已取消/已删除派单不作为当前有效工作
     if (`${d.no} ${d.title} ${d.siteCity} ${d.siteName} ${d.engineer} ${d.contactName} ${d.workNo || ''}`.toLowerCase().includes(q))
       out.dispatches.push(d);
   });
   NK.db.tasks.forEach(t => {
+    if (!NK.taskActive(t)) return; // 已取消/已删除或关联派单已失效的任务不作为当前有效工作
     if (`${t.no} ${t.name} ${t.type} ${t.siteCity} ${t.engineer} ${t.workNo || ''}`.toLowerCase().includes(q))
       out.tasks.push(t);
   });
@@ -527,6 +530,46 @@ NK.isDraft = (d) => NK.dispatchStatusKey(d) === 'draft';
 NK.dispatchInactive = (d) => !d || d.recordStatus === '已删除' || NK.dispatchStatusKey(d) === 'revoked' || d.status === '已取消';
 /** 是否仍在正式推进流程（非已完成/撤销/取消/删除/草稿）。草稿未正式生成，不算推进中。 */
 NK.dispatchActive = (d) => !NK.dispatchInactive(d) && !NK.isDraft(d) && NK.dispatchStatusKey(d) !== 'completed';
+
+/**
+ * 取一条派单关联任务的派单。优先按 dispatchId，其次按 sourceId/sourceType。
+ */
+NK.dispatchOfTask = (t) => {
+  if (!t) return null;
+  const id = t.dispatchId || (t.sourceType === 'dispatch' ? t.sourceId : '');
+  return id ? NK.getDispatch(id) : null;
+};
+
+/** 取一个派单关联的任务（一个派单至多一条任务）。优先按 taskId，其次按 sourceId/dispatchId 查找。 */
+NK.taskOfDispatch = (d) => {
+  if (!d) return null;
+  if (d.taskId) {
+    const t = NK.getTask(d.taskId);
+    if (t) return t;
+  }
+  return NK.db.tasks.find(x => (x.sourceType === 'dispatch' && x.sourceId === d.id) || x.dispatchId === d.id) || null;
+};
+
+/**
+ * 是否"当前有效任务"（核心统一规则）。
+ * 一个任务只有在满足以下条件时才属于当前工作，进入默认列表/时间轴/重点/告警/统计/交接/助手查询：
+ *   1. 任务本身未取消、未删除；
+ *   2. 若任务关联派单（dispatchId/sourceType=dispatch），对应派单必须是有效状态
+ *      —— 已撤销/已取消/已删除（软删除）的派单，其关联任务一律不作为当前有效工作。
+ * 历史记录保留在数据库，仅从"当前有效工作"中隐藏。
+ */
+NK.taskActive = (t) => {
+  if (!t) return false;
+  if (t.recordStatus === '已删除' || t.status === '已取消' || t.status === '已删除') return false;
+  const d = NK.dispatchOfTask(t);
+  if (d) {
+    // 关联派单已撤销/取消/删除（软删除）→ 任务不作为当前有效工作
+    if (NK.dispatchInactive(d)) return false;
+  }
+  return true;
+};
+/** 历史/非当前有效任务（取消、删除，或关联派单已失效）——仍可在历史/回收站查看 */
+NK.taskInactive = (t) => !NK.taskActive(t);
 
 /**
  * 创建派单（核心：一次操作完成多项工作）
@@ -605,7 +648,8 @@ NK.createDispatch = (data) => {
     createdAt: nowIso, startAt: '', dueDate: dispatch.planDone, dueTime: dispatch.planDoneTime,
     doneAt: '', status: '待处理', latestFeedback: '', nextAction: '派单已生成，等待花姐复制发送并通知工程师',
     result: '', acceptResult: '', acceptRequire: '处理完成后提交结果与现场照片，由创建人验收',
-    dispatchId: dispatch.id, projectId: dispatch.projectId || '',
+    dispatchId: dispatch.id, sourceType: 'dispatch', sourceId: dispatch.id,
+    projectId: dispatch.projectId || '',
     workNo: dispatch.workNo || '', tags: [], updatedAt: nowIso, kpiCounted: false,
   };
   NK.db.tasks.push(task);
@@ -744,7 +788,7 @@ NK.setDispatchStatus = (d, status) => {
     d.doneAt = d.doneAt || nowIso;
     d.completedAt = d.completedAt || nowIso;
     // 关联任务完成
-    const t = NK.getTask(d.taskId);
+    const t = NK.taskOfDispatch(d);
     if (t && t.status !== '已完成') { t.doneAt = nowIso; t.status = '已完成'; t.updatedAt = nowIso; }
   }
   if (key === 'revoked' && !d.revokedAt) d.revokedAt = nowIso;
@@ -754,7 +798,7 @@ NK.setDispatchStatus = (d, status) => {
     d.doneAt = ''; d.completedAt = '';
   }
   // 同步关联任务状态（按花姐的操作推进）
-  const task = NK.getTask(d.taskId);
+  const task = NK.taskOfDispatch(d);
   if (task && key !== 'completed') {
     const map = {
       'pending_send': '待处理', 'sent': '待处理',
@@ -779,7 +823,7 @@ NK.updateDispatchFeedback = (d, { feedback, nextAction, result, acceptResult, wo
   d.acceptResult = acceptResult != null ? acceptResult : d.acceptResult;
   if (workNo != null) d.workNo = workNo;
   d.updatedAt = NK.now();
-  const t = NK.getTask(d.taskId);
+  const t = NK.taskOfDispatch(d);
   if (t) {
     if (feedback != null) t.latestFeedback = feedback;
     if (nextAction != null) t.nextAction = nextAction;
@@ -825,7 +869,7 @@ NK.markDispatchSent = (id) => {
   // 若此前为异常待处理，恢复正常已发送时清除异常标记（保留异常记录用于追溯）
   d.exceptionType = ''; d.exceptionNote = ''; d.exceptionNext = '';
   // 关联任务置为待处理（若被标为处理中）
-  const t = NK.getTask(d.taskId);
+  const t = NK.taskOfDispatch(d);
   if (t && t.status !== '已完成') { t.status = '待处理'; t.updatedAt = NK.now(); }
   NK.save();
   return { ok: true, msg: `花姐，这条派单已记录为发给${NK.dispatchSupplierLabel(d)}，接下来按上门日期关注即可。` };
@@ -847,7 +891,7 @@ NK.markDispatchCompleted = (id, note) => {
   d.updatedAt = nowIso;
   NK.ensureStatusHistory(d, 'completed', note ? `标记完成：${note}` : '标记完成', nowIso);
   // 关联任务完成
-  const t = NK.getTask(d.taskId);
+  const t = NK.taskOfDispatch(d);
   if (t && t.status !== '已完成') { t.doneAt = nowIso; t.status = '已完成'; t.updatedAt = nowIso; }
   NK.save();
   return { ok: true, msg: '花姐，这条派单已经完成，顺利收尾。✅' };
@@ -900,7 +944,7 @@ NK.recordDispatchException = (id, data) => {
   d.updatedAt = nowIso;
   NK.ensureStatusHistory(d, 'exception', `记录异常：${d.exceptionType}`, nowIso);
   // 关联任务标记处理中
-  const t = NK.getTask(d.taskId);
+  const t = NK.taskOfDispatch(d);
   if (t && t.status !== '已完成') { t.status = '处理中'; t.updatedAt = nowIso; }
   NK.save();
   return { ok: true, msg: '该派单存在异常，请确认新的处理安排。' };
@@ -934,7 +978,7 @@ NK.reopenDispatch = (id) => {
   d.updatedAt = nowIso;
   NK.ensureStatusHistory(d, 'sent', '重新打开（回到已发送）', nowIso);
   // 关联任务重新打开
-  const t = NK.getTask(d.taskId);
+  const t = NK.taskOfDispatch(d);
   if (t && t.status === '已完成') { t.status = '待处理'; t.doneAt = ''; t.updatedAt = nowIso; }
   NK.save();
   return { ok: true, msg: `花姐，派单 ${d.no} 已重新打开，回到已发送状态。` };
@@ -942,13 +986,14 @@ NK.reopenDispatch = (id) => {
 
 /**
  * 撤销派单（业务取消，保留记录）。
- * opts: { reason, cancelTask }
+ * opts: { reason }
  *  - 状态改"已撤销"，记录撤销原因/时间/操作人
  *  - 停止等待时长/催办/告警/重点/待发送/超时统计（通过状态过滤）
  *  - 保留完整历史记录（reminders/feedback等不动）
- *  - 关联任务：cancelTask=true 时置为"已取消"（不删除），否则保留
+ *  - 关联任务：无论 cancelTask 如何，一律同步置为"已取消"（保留关联与历史，不删除）。
+ *    这是数据同步核心：派单一旦撤销，其关联任务立即退出"当前有效工作"。
  *  - 休假补位派单：回退休假记录的补位状态为"待创建派单"
- * 返回 { ok, msg, cancelTask }
+ * 返回 { ok, msg, cancelTask, leaveLinked }
  */
 NK.revokeDispatch = (id, opts = {}) => {
   const d = NK.getDispatch(id);
@@ -965,21 +1010,18 @@ NK.revokeDispatch = (id, opts = {}) => {
   // 清空下次跟进提醒，停止催办
   d.nextFollowup = '';
   let taskCancelled = false;
-  // 关联任务处理
-  const t = NK.getTask(d.taskId);
+  // 关联任务处理：撤销派单 → 关联任务同步置为"已取消"（保留历史，不删除）。
+  // 这是数据同步核心：派单一旦撤销，其关联任务立即退出"当前有效工作"。
+  const t = NK.taskOfDispatch(d);
   if (t) {
-    if (opts.cancelTask) {
-      t.status = '已取消';
-      t.cancelReason = d.revokeReason || '派单撤销';
-      t.cancelledAt = nowIso;
-      t.updatedAt = nowIso;
-      taskCancelled = true;
-    } else {
-      // 保留任务但解绑派单关系，避免它继续被当作派单关联项
-      if (t.dispatchId === d.id) t.dispatchId = '';
-      t.latestFeedback = (t.latestFeedback ? t.latestFeedback + '；' : '') + '关联派单 ' + d.no + ' 已撤销';
-      t.updatedAt = nowIso;
-    }
+    t.status = '已取消';
+    t.cancelReason = d.revokeReason || '派单撤销';
+    t.cancelledAt = nowIso;
+    t.dispatchId = d.id;
+    t.sourceType = 'dispatch';
+    t.sourceId = d.id;
+    t.updatedAt = nowIso;
+    taskCancelled = true;
   }
   // 休假补位派单：回退补位状态
   let leaveLinked = false;
@@ -1000,7 +1042,7 @@ NK.revokeDispatch = (id, opts = {}) => {
  * opts: { reason, force }
  *  - 已产生处理记录（已发送及之后状态）默认不允许普通删除，需 force 二次确认
  *  - 删除后：recordStatus='已删除'，不进正常列表，保留数据用于回收站恢复
- *  - 关联任务不自动删除；休假补位派单回退补位状态
+ *  - 关联任务同步标记为"已删除"（不可见，保留关联与历史）；休假补位派单回退补位状态
  * 返回 { ok, msg, blocked, canRevoke }
  */
 NK.softDeleteDispatch = (id, opts = {}) => {
@@ -1030,10 +1072,16 @@ NK.softDeleteDispatch = (id, opts = {}) => {
     leave.dispatchStatus = '待创建派单';
     leave.updatedAt = nowIso;
   }
-  // 关联任务解绑但不删除（保持历史），避免继续出现在派单关联提醒
-  const t = NK.getTask(d.taskId);
-  if (t && t.dispatchId === d.id) {
-    t.dispatchId = '';
+  // 关联任务：标记为已删除（不可见，保留数据），不再参与任何正常列表/统计/告警/交接。
+  // 保留 dispatchId/sourceId 关系，恢复派单时可一键恢复关联任务。
+  const t = NK.taskOfDispatch(d);
+  if (t) {
+    t.recordStatus = '已删除';
+    t.dispatchId = d.id;
+    t.sourceType = 'dispatch';
+    t.sourceId = d.id;
+    t.deleteReason = d.deleteReason || '派单删除';
+    t.deletedAt = nowIso;
     t.updatedAt = nowIso;
   }
   NK.save();
@@ -1051,9 +1099,14 @@ NK.restoreDispatch = (id) => {
   d.deletedBy = '';
   d.deleteReason = '';
   d.updatedAt = nowIso;
-  // 恢复关联任务关系（若任务仍在且未取消）
-  const t = NK.getTask(d.taskId);
-  if (t && t.status !== '已取消') { t.dispatchId = d.id; t.updatedAt = nowIso; }
+  // 恢复关联任务：清除"已删除"标记，重新进入当前有效工作。
+  // 任务若因派单删除被置为 recordStatus='已删除'，这里一并恢复。
+  const t = NK.taskOfDispatch(d);
+  if (t) {
+    if (t.recordStatus === '已删除') { t.recordStatus = '正常'; t.deleteReason = ''; t.deletedAt = ''; }
+    if (t.status !== '已取消') { t.dispatchId = d.id; t.sourceType = 'dispatch'; t.sourceId = d.id; }
+    t.updatedAt = nowIso;
+  }
   NK.save();
   return { ok: true, msg: `花姐，派单 ${d.no} 已恢复到正常列表。` };
 };
@@ -1070,11 +1123,14 @@ NK.unrevokeDispatch = (id) => {
   d.revokedBy = '';
   d.updatedAt = nowIso;
   NK.ensureStatusHistory(d, 'pending_send', '恢复派单（重新进入待发送）', nowIso);
-  // 恢复关联任务（若任务被取消则恢复为待处理）
-  const t = NK.getTask(d.taskId);
+  // 恢复关联任务（若任务被取消则恢复为待处理；清除删除标记）
+  const t = NK.taskOfDispatch(d);
   if (t) {
     if (t.status === '已取消') { t.status = '待处理'; t.cancelReason = ''; t.cancelledAt = ''; }
+    if (t.recordStatus === '已删除') { t.recordStatus = '正常'; t.deleteReason = ''; t.deletedAt = ''; }
     t.dispatchId = d.id;
+    t.sourceType = 'dispatch';
+    t.sourceId = d.id;
     t.updatedAt = nowIso;
   }
   // 休假补位：若该派单原本来自休假补位，需重新标记（保留当前休假关系判断由UI处理）
@@ -1090,8 +1146,15 @@ NK.purgeDispatch = (id) => {
   const idx = NK.db.dispatches.findIndex(x => x.id === id);
   if (idx === -1) return 0;
   NK.db.dispatches.splice(idx, 1);
-  // 解除关联任务对已删派单的引用
-  NK.db.tasks.forEach(t => { if (t.dispatchId === id) t.dispatchId = ''; });
+  // 永久删除派单后，其关联任务一并标记为已删除（不可见），避免成为无主/幽灵任务。
+  NK.db.tasks.forEach(t => {
+    if (t.dispatchId === id || (t.sourceType === 'dispatch' && t.sourceId === id)) {
+      t.dispatchId = ''; t.sourceId = ''; t.sourceType = '';
+      t.recordStatus = '已删除';
+      t.deleteReason = '关联派单已永久删除';
+      t.updatedAt = NK.now();
+    }
+  });
   NK.save();
   return 1;
 };
@@ -1381,7 +1444,7 @@ NK.autoKpi = (engineerName, month) => {
   const rules = NK.db.kpiRules;
   const out = { taskCount: 0, overdue: [], slowResp: [], deductTotal: 0, bonusTotal: 0, events: [] };
   // 当月该工程师任务与派单
-  const tasks = NK.db.tasks.filter(t => t.engineer === engineerName && (t.createdAt || '').slice(0, 7) === month);
+  const tasks = NK.db.tasks.filter(t => NK.taskActive(t) && t.engineer === engineerName && (t.createdAt || '').slice(0, 7) === month);
   const disps = NK.db.dispatches.filter(d => d.engineer === engineerName && (d.createdAt || '').slice(0, 7) === month && !NK.dispatchInactive(d));
   out.taskCount = tasks.length + disps.length;
   // 响应速度：花姐标记"已发送"后超1h无跟进记录
@@ -1427,8 +1490,9 @@ NK.addReminder = (title, content, refType, refId, dueDate) => {
 NK.genReminders = () => {
   const list = [];
   const today = NK.today();
-  // 1. P1未处理任务
+  // 1. P1未处理任务（仅当前有效任务；已取消/已删除或关联派单已失效的任务不参与告警）
   NK.db.tasks.forEach(t => {
+    if (!NK.taskActive(t)) return;   // 派单已撤销/删除/取消的任务不产生任何任务告警
     if (t.priority === 'P1' && ['待处理', '已分配'].includes(t.status)) {
       list.push({ id: 'R-' + t.id, level: 'danger', title: 'P1任务未处理', content: `${t.no} ${t.name}（${t.siteName || '—'}）`, actions: [{ label: '查看任务', act: 'task', arg: t.id }] });
     }
@@ -1629,6 +1693,7 @@ NK.genFocusItems = () => {
 
   // ── 1. P1超时任务 ─────────────────────────────────────────
   NK.db.tasks.forEach(t => {
+    if (!NK.taskActive(t)) return;   // 关联派单已失效/已取消/已删除的任务不进入重点
     if (t.priority !== 'P1' || t.status === '已完成') return;
     const overdue = t.dueDate && today > t.dueDate;
     const longWait = (t.status === '已分配' || t.status === '待处理') &&
@@ -1654,6 +1719,7 @@ NK.genFocusItems = () => {
 
   // ── 2. 任务超时（P2/P3）──────────────────────────────────
   NK.db.tasks.forEach(t => {
+    if (!NK.taskActive(t)) return;   // 关联派单已失效/已取消/已删除的任务不进入重点
     if (t.priority === 'P1' || t.status === '已完成') return;
     if (!t.dueDate || today <= t.dueDate) return;
     const wait = NK.humanDur(new Date(today + 'T23:59:59').getTime() - new Date(t.dueDate + 'T23:59:59').getTime());
@@ -1761,6 +1827,7 @@ NK.genFocusItems = () => {
 
   // ── 7. 24小时内到期的任务 ─────────────────────────────────
   NK.db.tasks.forEach(t => {
+    if (!NK.taskActive(t)) return;   // 已取消/已删除/关联派单已失效的任务不进入重点
     if (t.status === '已完成') return;
     if (!t.dueDate || NK.daysBetween(today, t.dueDate) > 1) return;
     if (usedIds.has('t-p1-' + t.id) || usedIds.has('t-ov-' + t.id)) return;
@@ -1870,6 +1937,7 @@ NK.genHandover = (startDate, endDate, opts) => {
   });
   // 任务
   NK.db.tasks.forEach(t => {
+    if (!NK.taskActive(t)) return; // 已取消/已删除/关联派单已失效 → 不作为当前交接工作
     if (t.status === '已完成') return;
     if (t.dueDate && t.dueDate >= s && t.dueDate <= e && !sec.dispatchingDue.find(x => x.id === t.dispatchId)) {
       sec.dispatchingDue.push(t);
@@ -1885,7 +1953,7 @@ NK.genHandover = (startDate, endDate, opts) => {
     if (p.status === '有风险' || (p.dueDate && NK.today() > p.dueDate)) sec.risks.push({ name: p.name, note: p.risk || '已超期或存在风险' });
   });
   if (opts.includeToday) {
-    sec.doneToday = NK.db.tasks.filter(t => t.doneAt && t.doneAt.slice(0, 10) === today);
+    sec.doneToday = NK.db.tasks.filter(t => NK.taskActive(t) && t.doneAt && t.doneAt.slice(0, 10) === today);
   }
   const text = NK.renderHandoverText(sec, { s, e, includeToday: opts.includeToday });
   return { sec, text, start: s, end: e };
@@ -2107,5 +2175,99 @@ NK.migrateFixedTasks = () => {
   });
 
   NK.db.fixedMigrated = true;
+  NK.save();
+};
+
+/* ============================================================
+   派单关联任务同步迁移（幂等）
+   核心原则：一个派单只能对应一条关联任务；任务是否有效以派单当前状态为准。
+    - 为旧关联任务补齐 sourceType/sourceId
+    - 去重：同一派单的多条任务，保留一条有效主记录，其余标记为已删除
+    - 已撤销/已删除派单 → 其关联任务同步标记为已取消/已删除（不可见）
+    - 已恢复派单（非失效状态）→ 其关联任务恢复可见
+   安全可重复调用，不删除任何派单或任务历史数据。
+   ============================================================ */
+NK.migrateDispatchTaskSync = () => {
+  const nowIso = NK.now();
+  const byDispatch = {};   // dispatchId -> [tasks]
+  (NK.db.tasks || []).forEach(t => {
+    const did = t.dispatchId || (t.sourceType === 'dispatch' ? t.sourceId : '');
+    if (!did) return;
+    t.sourceType = 'dispatch';
+    t.sourceId = did;
+    (byDispatch[did] = byDispatch[did] || []).push(t);
+  });
+  // 去重：同一派单只保留一条主记录（优先未删除、未取消、最新创建），其余归档为已删除
+  Object.keys(byDispatch).forEach(did => {
+    const arr = byDispatch[did];
+    if (arr.length <= 1) return;
+    // 主记录优先级：recordStatus 正常 > 未取消 > createdOrder
+    const rank = t => (
+      (t.recordStatus !== '已删除' ? 8 : 0) +
+      (t.status !== '已取消' ? 4 : 0) +
+      (t.status !== '已完成' ? 2 : 0)
+    );
+    const sorted = [...arr].sort((a, b) => (rank(b) - rank(a)) || (new Date(b.createdAt) - new Date(a.createdAt)));
+    const primary = sorted[0];
+    const d = NK.getDispatch(did);
+    if (d) d.taskId = primary.id;
+    // 主记录不再视为归档重复（若曾被打标记则清除）
+    delete primary.dupArchived;
+    sorted.slice(1).forEach(dup => {
+      if (dup.recordStatus !== '已删除') {
+        dup.recordStatus = '已删除';
+        dup.deleteReason = '同派单重复关联任务，已归档';
+        dup.deletedAt = dup.deletedAt || nowIso;
+        dup.updatedAt = nowIso;
+      }
+      // 标记为去重归档：状态对齐阶段不得再将其恢复为可见
+      dup.dupArchived = true;
+    });
+  });
+  // 状态对齐：以派单当前状态为准同步关联任务
+  (NK.db.tasks || []).forEach(t => {
+    if (t.sourceType !== 'dispatch' && !t.dispatchId) return;
+    // 去重归档的记录不再参与状态对齐恢复（保持不可见）
+    if (t.dupArchived) return;
+    const did = t.dispatchId || t.sourceId;
+    const d = NK.getDispatch(did);
+    // 派单已被永久删除 → 任务标记为已删除，不再作为当前工作
+    if (!d) {
+      if (t.recordStatus !== '已删除') { t.recordStatus = '已删除'; t.deleteReason = '关联派单已不存在'; t.updatedAt = nowIso; }
+      return;
+    }
+    if (NK.dispatchInactive(d)) {
+      // 已撤销/已取消/已删除派单 → 关联任务退出当前工作
+      if (NK.dispatchStatusKey(d) === 'revoked' || d.status === '已取消') {
+        if (t.status !== '已取消') {
+          t.status = '已取消';
+          t.cancelReason = t.cancelReason || (d.revokeReason || '派单撤销');
+          t.cancelledAt = t.cancelledAt || (d.revokedAt || nowIso);
+          t.updatedAt = nowIso;
+        }
+      } else if (d.recordStatus === '已删除') {
+        if (t.recordStatus !== '已删除') {
+          t.recordStatus = '已删除';
+          t.deleteReason = t.deleteReason || (d.deleteReason || '派单删除');
+          t.deletedAt = t.deletedAt || (d.deletedAt || nowIso);
+          t.updatedAt = nowIso;
+        }
+      }
+    } else if (t.status === '已取消' && !t.cancelledAt && NK.dispatchStatusKey(d) !== 'revoked') {
+      // 非失效派单但任务残留已取消（可能由旧撤销未恢复导致）——恢复为待处理
+      t.status = '待处理';
+      t.cancelReason = '';
+      t.cancelledAt = '';
+      t.updatedAt = nowIso;
+    } else if (t.recordStatus === '已删除' && d.recordStatus !== '已删除') {
+      // 派单已恢复，但任务仍被标记删除（撤销恢复场景）
+      if (NK.dispatchStatusKey(d) !== 'revoked') {
+        t.recordStatus = '正常';
+        t.deleteReason = '';
+        t.deletedAt = '';
+        t.updatedAt = nowIso;
+      }
+    }
+  });
   NK.save();
 };

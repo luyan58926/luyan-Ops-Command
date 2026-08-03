@@ -423,7 +423,7 @@ UI.renderHome = () => {
   const tl = [];
   // 1) 每日/月度固定任务实例：只显示今天确实存在的实例（固定任务去重，不堆叠）
   //    每日类：今日实例；月度类：当月实例（月报/月会满足条件后才会生成）
-  const todayFixed = tasks.filter(t => t.source === '系统固定任务' &&
+  const todayFixed = tasks.filter(t => NK.taskActive(t) && t.source === '系统固定任务' &&
     (t.fixedDate === today || t.fixedYM === today.slice(0, 7)));
   todayFixed.forEach(t => {
     const tpl = NK.FIXED_TASKS.find(x => x.id === t.templateId);
@@ -439,8 +439,8 @@ UI.renderHome = () => {
       done, status: t.status, taskId: t.id,
     });
   });
-  // 2) 今日新建的任务（排除固定任务实例，避免与定时条目重复）
-  tasks.filter(t => (t.createdAt || '').slice(0, 10) === today && t.source !== '系统固定任务')
+  // 2) 今日新建的任务（排除固定任务实例，避免与定时条目重复；只保留当前有效任务）
+  tasks.filter(t => NK.taskActive(t) && (t.createdAt || '').slice(0, 10) === today && t.source !== '系统固定任务')
     .forEach(t => {
       tl.push({
         sort: (t.createdAt || '23:59:59').slice(11, 16).replace(':', '') || '2359',
@@ -466,8 +466,7 @@ UI.renderHome = () => {
     disps.filter(d =>
       (d.planArrive || '') === dateStr &&
       !['completed', 'draft', 'revoked'].includes(NK.dispatchStatusKey(d))
-    );
-  const dispsOnDay = dispOnDay(today);
+    );  const dispsOnDay = dispOnDay(today);
   dispsOnDay.forEach(d => {
     tl.push({
       sort: (d.planArriveTime || (d.planArrive || today) + 'T12:00').replace(/.*T/, '').slice(0, 5).replace(':', ''),
@@ -1960,10 +1959,22 @@ UI.renderTasks = () => {
   const el = document.getElementById('view-tasks');
   const f = NK.taskFilter = NK.taskFilter || {};
   const today = NK.today();
+  // 「全部」= 全部有效任务：默认只展示当前有效工作
+  //   - 有效任务 = NK.taskActive(t)：排除 已取消/已删除，及关联派单已撤销/已删除的任务
+  //   - 历史（已取消/已删除）通过下方来源筛选单独查看
+  const showCancelled = f.source === '已取消';
+  const showDeleted = f.source === '已删除';
   let list = [...NK.db.tasks].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  if (showCancelled) {
+    list = list.filter(t => NK.taskInactive(t) && (t.status === '已取消' || (NK.dispatchOfTask(t) && NK.dispatchInactive(NK.dispatchOfTask(t)) && NK.dispatchStatusKey(NK.dispatchOfTask(t)) === 'revoked')));
+  } else if (showDeleted) {
+    list = list.filter(t => t.recordStatus === '已删除');
+  } else {
+    list = list.filter(t => NK.taskActive(t));
+  }
   if (f.status && f.status !== '全部') list = list.filter(t => t.status === f.status);
   if (f.type && f.type !== '全部') list = list.filter(t => t.type === f.type);
-  if (f.source && f.source !== '全部') {
+  if (f.source && f.source !== '全部' && !showCancelled && !showDeleted) {
     if (f.source === '已完成') list = list.filter(t => t.status === '已完成');
     else list = list.filter(t => NK.taskSourceKey(t) === f.source);
   }
@@ -1976,7 +1987,7 @@ UI.renderTasks = () => {
   const warn = rem.filter(x => x.level !== 'danger');
 
   // 今日固定任务（系统固定任务·每日类）进度
-  const dailyTasks = NK.db.tasks.filter(t => t.source === '系统固定任务' &&
+  const dailyTasks = NK.db.tasks.filter(t => NK.taskActive(t) && t.source === '系统固定任务' &&
     ['每日', '每日14:30', '每日下班前'].includes(t.frequency) && t.fixedDate === today);
   const dailyHTML = `<div class="card"><div class="card-head"><div class="card-title">今日固定任务（每日）</div>
     <span class="badge accent">${dailyTasks.filter(x => x.status === '已完成').length}/${dailyTasks.length} 完成</span></div>
@@ -2014,7 +2025,7 @@ UI.renderTasks = () => {
 
   const statusOpts = ['全部', ...NK.TASK_STATUS];
   const typeOpts = ['全部', ...NK.TASK_TYPES];
-  const srcOpts = ['全部', '系统固定任务', '花姐手动新增', '安全告警', '派单自动关联', '专项任务', '已完成'];
+  const srcOpts = ['全部', '系统固定任务', '花姐手动新增', '安全告警', '派单自动关联', '专项任务', '已完成', '已取消', '已删除'];
   el.innerHTML = UI.pageHead('任务与告警', '任务闭环 · 告警驱动 · 固定任务每日/月度自动生成',
     `<button class="btn" onclick="UI.triggerFixed('TPL005')">🖨️ 收到耗材提醒</button><button class="btn btn-accent" onclick="UI.taskCreate()">✚ 新建任务</button>`) +
     `<div class="filter-bar">
@@ -2026,16 +2037,19 @@ UI.renderTasks = () => {
       <span class="spacer"></span><span style="font-size:12px;color:var(--text-3)">共 ${list.length} 条</span>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">${dailyHTML}${alertHTML}</div>
-    <div class="card"><div class="card-head"><div class="card-title">全部任务</div></div>
+    <div class="card"><div class="card-head"><div class="card-title">${showCancelled ? '已取消任务' : showDeleted ? '已删除任务' : '全部任务（有效）'}</div></div>
     <div class="table-wrap"><table class="tbl">
       <thead><tr><th>编号</th><th>任务</th><th>类型</th><th>优先级</th><th>职场</th><th>工程师</th><th>状态</th><th>截止</th><th>最后更新</th><th>操作</th></tr></thead>
       <tbody>${list.length ? list.map(t => {
         const v = NK.v.task(t);
         const isOv = t.dueDate && t.dueDate < today && t.status !== '已完成';
-        return `<tr>
+        // 历史记录（已取消/已删除）以灰色 + 删除线展示
+        const hist = (showCancelled || showDeleted) && (t.status === '已取消' || t.recordStatus === '已删除');
+        const nameStyle = hist ? 'text-decoration:line-through;color:var(--text-3)' : '';
+        return `<tr${hist ? ' style="opacity:.7"' : ''}>
           <td class="num">${t.no}</td>
-          <td style="max-width:220px"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${NK.esc(t.name)}</div>
-            <div style="color:var(--text-3);font-size:11px">${NK.esc(NK.taskSourceLabel(t))}</div></td>
+          <td style="max-width:220px"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${nameStyle}">${NK.esc(t.name)}</div>
+            <div style="color:var(--text-3);font-size:11px">${NK.esc(NK.taskSourceLabel(t))}${t.cancelReason ? ' · 取消原因：' + NK.esc(t.cancelReason) : ''}${t.deleteReason ? ' · ' + NK.esc(t.deleteReason) : ''}</div></td>
           <td><span class="tag">${NK.esc(t.type)}</span></td>
           <td>${UI.priBadge(t.priority)}</td>
           <td>${NK.esc(v.siteName || '—')}</td>
@@ -2045,8 +2059,9 @@ UI.renderTasks = () => {
           <td>${(t.updatedAt || t.createdAt).slice(0, 16).replace('T', ' ')}</td>
           <td style="white-space:nowrap">
             <button class="btn btn-sm" onclick="UI.taskDetail('${t.id}')">详情</button>
-            ${t.status !== '已完成' ? `<button class="btn btn-sm btn-accent" onclick="UI.taskFeedback('${t.id}')">更新</button>` : ''}
-            ${t.status !== '已完成' ? `<button class="btn btn-sm" onclick="UI.taskUrgent('${t.id}')">催办</button>` : ''}
+            ${(showCancelled && t.status === '已取消' && NK.dispatchOfTask(t) && !NK.dispatchInactive(NK.dispatchOfTask(t))) ? `<button class="btn btn-sm btn-accent" onclick="UI.taskReactivate('${t.id}')">恢复</button>` : ''}
+            ${t.status !== '已完成' && !hist ? `<button class="btn btn-sm btn-accent" onclick="UI.taskFeedback('${t.id}')">更新</button>` : ''}
+            ${t.status !== '已完成' && !hist ? `<button class="btn btn-sm" onclick="UI.taskUrgent('${t.id}')">催办</button>` : ''}
           </td>
         </tr>`;
       }).join('') : UI.empty('暂无任务，点击右上角「新建任务」或通过派单自动生成', 10)}</tbody>
@@ -2736,7 +2751,7 @@ UI.notesLinkProjectDo = (noteId, projectId) => {
 
 /** 选择任务并更新进度 */
 UI.taskPickUpdate = () => {
-  const active = NK.db.tasks.filter(t => t.status !== '已完成' && t.status !== '已取消');
+  const active = NK.db.tasks.filter(t => NK.taskActive(t) && t.status !== '已完成' && t.status !== '已取消');
   if (!active.length) { UI.toast('花姐，当前没有进行中的任务 😊', 'warn'); return; }
   UI.modal('更新任务进度', `
     <p style="color:var(--text-3);font-size:12px">选择要更新进度的任务：</p>
@@ -2824,6 +2839,28 @@ UI.taskUrgent = (id) => {
     onMount(root) {
       root.querySelector('#urgCopy').onclick = () => { UI.copy(msg); };
     },
+  });
+};
+
+/** 恢复已取消任务（仅当其关联派单已恢复为有效状态时可用） */
+UI.taskReactivate = (id) => {
+  const t = NK.getTask(id);
+  if (!t) return;
+  UI.confirm(`确认恢复任务「${t.name}」？恢复后将重新进入当前有效工作。`, () => {
+    const d = NK.dispatchOfTask(t);
+    if (d && !NK.dispatchInactive(d)) {
+      t.status = '待处理';
+      t.cancelReason = '';
+      t.cancelledAt = '';
+      if (t.recordStatus === '已删除') { t.recordStatus = '正常'; t.deleteReason = ''; t.deletedAt = ''; }
+      t.updatedAt = NK.now();
+      NK.save();
+      UI.toast(`花姐，任务 ${t.no} 已恢复。`);
+      UI.renderTasks();
+      UI.refreshBadges();
+    } else {
+      UI.toast('该任务关联的派单当前为撤销/删除状态，请先恢复派单。', 'err');
+    }
   });
 };
 
@@ -3448,8 +3485,8 @@ UI.engDetail = (id) => {
   if (!e) return;
   const v = NK.v.eng(e);
   const sites = NK.sitesByEngineer(e.name);
-  const disps = NK.db.dispatches.filter(d => d.engineer === e.name).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  const tasks = NK.db.tasks.filter(t => t.engineer === e.name && t.status !== '已完成');
+  const disps = NK.db.dispatches.filter(d => d.engineer === e.name && !NK.dispatchInactive(d)).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const tasks = NK.db.tasks.filter(t => NK.taskActive(t) && t.engineer === e.name && t.status !== '已完成');
   const kpi = NK.computeKpi(e.name, NK.curMonth());
   // ── 休假情况（轻量）──
   const engLeaves = NK.leavesByEngineer(e.name).sort((a, b) => b.startDate.localeCompare(a.startDate));
@@ -4105,7 +4142,7 @@ UI.renderReports = () => {
   const el = document.getElementById('view-reports');
   const today = NK.today();
   const openDisps = NK.db.dispatches.filter(d => NK.dispatchActive(d)).length;
-  const openTasks = NK.db.tasks.filter(t => t.status !== '已完成' && t.status !== '已取消').length;
+  const openTasks = NK.db.tasks.filter(t => NK.taskActive(t) && t.status !== '已完成' && t.status !== '已取消').length;
   const openProjs = NK.db.projects.filter(p => p.status !== '已完成' && p.status !== '已取消').length;
   const overdue = NK.genReminders().filter(x => x.level === 'danger').length;
 
@@ -4214,14 +4251,14 @@ UI.weekReport = () => {
   const s = NK.fmtDate(start);
   const disps = NK.db.dispatches.filter(d => d.createdAt.slice(0, 10) >= s && d.createdAt.slice(0, 10) <= end);
   const formalDisps = disps.filter(d => NK.dispatchStatusKey(d) !== 'draft' && d.recordStatus !== '已删除');
-  const tasks = NK.db.tasks.filter(t => t.createdAt.slice(0, 10) >= s && t.createdAt.slice(0, 10) <= end);
-  const done = NK.db.tasks.filter(t => t.doneAt && t.doneAt.slice(0, 10) >= s && t.doneAt.slice(0, 10) <= end);
+  const tasks = NK.db.tasks.filter(t => NK.taskActive(t) && t.createdAt.slice(0, 10) >= s && t.createdAt.slice(0, 10) <= end);
+  const done = NK.db.tasks.filter(t => NK.taskActive(t) && t.doneAt && t.doneAt.slice(0, 10) >= s && t.doneAt.slice(0, 10) <= end);
   const evs = NK.db.kpiEvents.filter(e => e.date >= s && e.date <= end);
   const text = [
     `══════ IT运维周报（${s} 至 ${end}）══════`,
     `一、总体概况`,
     `  新建正式派单 ${formalDisps.length} 单（草稿 ${disps.length - formalDisps.length} 条未计入），新建任务 ${tasks.length} 条，完成任务 ${done.length} 条。`,
-    `  当前进行中：派单 ${NK.db.dispatches.filter(d => NK.dispatchActive(d)).length} 单 / 任务 ${NK.db.tasks.filter(t => t.status !== '已完成').length} 条 / 专项 ${NK.db.projects.filter(p => p.status !== '已完成').length} 个。`,
+    `  当前进行中：派单 ${NK.db.dispatches.filter(d => NK.dispatchActive(d)).length} 单 / 任务 ${NK.db.tasks.filter(t => NK.taskActive(t) && t.status !== '已完成').length} 条 / 专项 ${NK.db.projects.filter(p => p.status !== '已完成').length} 个。`,
     ``,
     `二、派单明细`,
     formalDisps.length ? formalDisps.map(d => `  • [${d.priority}] ${d.no} ${d.title}（${d.city}）→ ${d.engineer}，${NK.dispatchStatusLabel(d)}`).join('\n') : `  （本周无新建派单）`,
@@ -4246,12 +4283,12 @@ UI.monthReport = () => {
   const allDisps = NK.db.dispatches.filter(d => d.createdAt.slice(0, 7) === month);
   // 正式派单：排除草稿与已删除（recordStatus）
   const disps = allDisps.filter(d => NK.dispatchStatusKey(d) !== 'draft' && d.recordStatus !== '已删除');
-  const tasks = NK.db.tasks.filter(t => t.createdAt.slice(0, 7) === month);
-  const done = NK.db.tasks.filter(t => t.doneAt && t.doneAt.slice(0, 7) === month);
+  const tasks = NK.db.tasks.filter(t => NK.taskActive(t) && t.createdAt.slice(0, 7) === month);
+  const done = NK.db.tasks.filter(t => NK.taskActive(t) && t.doneAt && t.doneAt.slice(0, 7) === month);
   const kpiRows = NK.db.engineers.map(e => { const k = NK.computeKpi(e.name, month); return `${k.engineer}:${k.final}分`; }).join('  ');
   const engStat = NK.db.engineers.map(e => {
-    const n = NK.db.tasks.filter(t => t.engineer === e.name && t.createdAt.slice(0, 7) === month).length;
-    const nd = NK.db.dispatches.filter(d => d.engineer === e.name && d.createdAt.slice(0, 7) === month).length;
+    const n = NK.db.tasks.filter(t => NK.taskActive(t) && t.engineer === e.name && t.createdAt.slice(0, 7) === month).length;
+    const nd = NK.db.dispatches.filter(d => !NK.dispatchInactive(d) && d.engineer === e.name && d.createdAt.slice(0, 7) === month).length;
     return `  ${e.name}：任务${n} / 派单${nd}`;
   }).join('\n');
   // 新状态统计：草稿/已删除不计入正式总数

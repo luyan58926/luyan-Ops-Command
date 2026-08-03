@@ -934,6 +934,22 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .tl-item.tl-done .tl-name { color: var(--text-3); text-decoration: line-through; }
 .tl-note { font-size: 11px; color: var(--text-3); margin-top: 2px; }
 
+/* 来源标签胶囊（派单/日常/专项/任务）· 文字简洁、无Emoji、低饱和 */
+.tl-src-wrap { display: inline-flex; align-items: center; margin-right: 6px; vertical-align: middle; }
+.tl-src {
+  display: inline-flex; align-items: center; height: 18px; line-height: 1;
+  padding: 0 7px; border-radius: 7px;
+  font-size: 11px; font-weight: 500; white-space: nowrap;
+}
+.tl-src-dispatch { background: #e9edfa; color: #5a6cc0; }   /* 派单：浅蓝紫 */
+.tl-src-daily   { background: #f0eef8; color: #8a7fb5; }    /* 日常：浅灰紫 */
+.tl-src-project { background: #eef1f5; color: var(--text-2); } /* 专项：中性浅灰 */
+.tl-src-task    { background: #f0f1f3; color: var(--text-2); } /* 普通任务：中性浅灰 */
+/* 已完成任务：来源标签降透明度（不加删除线） */
+.tl-src-done { opacity: .45; }
+/* P1/P2 优先级标签与来源标签、任务名保持间距（P3 已隐藏） */
+.tl-pri { display: inline-flex; align-items: center; margin-left: 7px; vertical-align: middle; }
+
 /* 状态概览pill样式保持 */
 .ds-pill {
   display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px;

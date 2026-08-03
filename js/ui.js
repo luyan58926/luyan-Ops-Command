@@ -407,6 +407,34 @@ UI.renderHomeGreeting = (date) => {
 };
 
 /* ============================================================
+   今日时间轴 · 来源标签
+   - tlSourceBadge(t)：根据条目来源返回文字胶囊（不添加 Emoji）
+     · 派单任务（关联有效派单）→ 派单（浅蓝紫）
+     · 系统固定任务 → 日常（浅灰紫）
+     · 专项 → 专项（沿用现有风格）
+     · 普通任务 → 任务（中性浅灰）
+   - done 时追加弱化样式（降低透明度，不加删除线）
+   ============================================================ */
+UI.tlSourceBadge = (t) => {
+  if (!t) return '';
+  // 派单条目（dispsOnDay 收录，名称已含"派单"字样）不再重复加来源标签
+  if (t.kind === 'dispatch' || t.type === 'dispatch') return '';
+  let label = '', cls = 'tl-src';
+  // 是否为派单关联任务：条目自带 dispatchId/sourceType，或通过 taskId 反查原始任务
+  let isDispatch = !!(t.dispatchId || (t.sourceType === 'dispatch' && t.sourceId) || t.dispatchOfTask);
+  if (!isDispatch && t.kind === 'task' && t.taskId) {
+    const raw = NK.getTask(t.taskId);
+    if (raw && NK.dispatchOfTask(raw)) isDispatch = true;
+  }
+  if (t.kind === 'project' || t.type === 'project') { label = '专项'; cls += ' tl-src-project'; }
+  else if (isDispatch) { label = '派单'; cls += ' tl-src-dispatch'; }
+  else if (t.kind === 'tpl' || t.source === '系统固定任务' || t.templateId) { label = '日常'; cls += ' tl-src-daily'; }
+  else { label = '任务'; cls += ' tl-src-task'; }
+  if (t.done) cls += ' tl-src-done';
+  return `<span class="${cls}">${label}</span>`;
+};
+
+/* ============================================================
    今日指挥台 v2 — 四区域结构
    ============================================================ */
 UI.renderHome = () => {
@@ -557,11 +585,14 @@ UI.renderHome = () => {
         const cmplBtn = isConsumable
           ? `<button class="btn btn-sm ${t.done ? 'btn-ghost' : 'btn-accent'}" style="margin-left:8px;vertical-align:middle" onclick="event.stopPropagation();UI.toggleConsumableDone('${t.taskId}',${t.done})">${t.done ? '↩ 撤销' : '✓ 标记完成'}</button>`
           : '';
+        const srcBadge = UI.tlSourceBadge(t);
+        // P3 为普通优先级，时间轴中不显示其标签；无优先级也不显示
+        const priBadge = (t.pri && t.pri !== 'P3') ? `<span class="tl-pri">${UI.priBadge(t.pri)}</span>` : '';
         return `<div ${clickAttr}>
           <span class="tl-time">${t.time}</span>
-          ${t.type === 'dispatch' ? '<span class="badge gray" style="margin-right:4px">派</span>' : ''}
+          ${srcBadge ? `<span class="tl-src-wrap">${srcBadge}</span>` : ''}
           <span class="tl-name">${t.done ? '✓ ' : ''}${NK.esc(t.name)}</span>
-          ${t.pri ? `<span style="margin-left:6px">${UI.priBadge(t.pri)}</span>` : ''}
+          ${priBadge}
           ${t.sub ? `<div class="tl-note">${t.sub}</div>` : ''}
           ${cmplBtn}
         </div>`;

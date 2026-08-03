@@ -18,11 +18,38 @@ const NK = {
 };
 
 /* ---------- 状态枚举 ---------- */
-// 派单状态：花姐单人使用，工程师通过外部渠道沟通，不在系统内确认或反馈
+// 派单状态：花姐单人使用，工程师通过外部渠道沟通，不在系统内确认或反馈。
+// 正常流程只有三态：待发送 → 已发送 → 已完成；旁路两态：异常待处理、已撤销；草稿为创建前辅助态。
+// 数据字段统一使用英文枚举：draft | pending_send | sent | exception | completed | revoked
 NK.DISPATCH_STATUS = [
-  '草稿', '已生成', '已发送', '跟进中', '处理中',
-  '等待外部条件', '已处理', '待花姐验收', '已闭环',
+  '草稿', '待发送', '已发送', '已完成', '异常待处理', '已撤销',
 ];
+// 中文显示映射
+NK.DISPATCH_STATUS_LABEL = {
+  draft: '草稿',
+  pending_send: '待发送',
+  sent: '已发送',
+  exception: '异常待处理',
+  completed: '已完成',
+  revoked: '已撤销',
+};
+// 中文状态 → 英文枚举（含旧状态迁移映射）
+NK.DISPATCH_STATUS_KEY = {
+  '草稿': 'draft',
+  '待发送': 'pending_send',
+  '已发送': 'sent',
+  '已完成': 'completed',
+  '异常待处理': 'exception',
+  '已撤销': 'revoked',
+  // 旧九步状态迁移
+  '已生成': 'pending_send',
+  '跟进中': 'sent',
+  '处理中': 'sent',
+  '等待外部条件': 'exception',
+  '已处理': 'completed',
+  '待花姐验收': 'sent',       // 不自动判完成，转待发送后提示确认
+  '已闭环': 'completed',
+};
 NK.DISPATCH_EXTRA = ['已取消', '已暂停', '升级处理', '无需派单', '已撤销'];
 NK.DISPATCH_RECORD_STATUS = ['正常', '已删除'];
 NK.TASK_STATUS = ['待处理', '已分配', '处理中', '待反馈', '待验收', '已完成'];
@@ -427,7 +454,7 @@ NK.engineerHasActiveCoverDispatch = (engineerName) =>
     l.recordStatus === '有效' && l.engineerName === engineerName &&
     l.relatedDispatchId &&
     ['已创建派单'].includes(l.dispatchStatus) &&
-    (() => { const d = NK.getDispatch(l.relatedDispatchId); return d && !['已闭环', '已取消'].includes(d.status); })());
+    (() => { const d = NK.getDispatch(l.relatedDispatchId); return d && !NK.dispatchInactive(d) && NK.dispatchStatusKey(d) !== 'completed'; })());
 
 /** 按城市查找职场（同城多职场必须列出全部） */
 NK.sitesByCity = (city) => NK.db.sites.filter(s => s.city.includes(city) || city.includes(s.city));
@@ -479,12 +506,27 @@ NK.search = (q) => {
 /* ============================================================
    派单
    ============================================================ */
-NK.DISPATCH_FLOW = ['草稿', '已生成', '已发送', '跟进中', '处理中', '等待外部条件', '已处理', '待花姐验收', '已闭环'];
-NK.dispatchStep = (status) => NK.DISPATCH_FLOW.indexOf(status);
+// 新派单状态（英文枚举，数据库字段值）。正常三态 + 旁路两态 + 草稿。
+NK.DISPATCH_FLOW = ['draft', 'pending_send', 'sent', 'exception', 'completed', 'revoked'];
+/** 取派单当前状态的英文枚举值：兼容旧中文状态数据（自动迁移） */
+NK.dispatchStatusKey = (d) => {
+  if (!d || !d.status) return '';
+  if (NK.DISPATCH_STATUS_KEY[d.status]) return NK.DISPATCH_STATUS_KEY[d.status];
+  return d.status; // 已经是英文枚举则原样返回
+};
+/** 取派单当前状态的中文显示名（历史/未知状态回退为原值） */
+NK.dispatchStatusLabel = (d) => {
+  if (!d || !d.status) return '未标注';
+  if (NK.DISPATCH_STATUS_LABEL[d.status]) return NK.DISPATCH_STATUS_LABEL[d.status];
+  if (NK.DISPATCH_STATUS_KEY[d.status]) return NK.DISPATCH_STATUS_LABEL[NK.DISPATCH_STATUS_KEY[d.status]];
+  return d.status;
+};
+/** 是否草稿（创建前辅助态，不进入正式流程） */
+NK.isDraft = (d) => NK.dispatchStatusKey(d) === 'draft';
 /** 是否已撤销/已软删除（退出一切正常跟进、催办、告警、统计、交接） */
-NK.dispatchInactive = (d) => !d || d.recordStatus === '已删除' || d.status === '已撤销' || d.status === '已取消';
-/** 是否仍在正常流程（非已闭环/已撤销/已取消/已删除） */
-NK.dispatchActive = (d) => !NK.dispatchInactive(d) && d.status !== '已闭环';
+NK.dispatchInactive = (d) => !d || d.recordStatus === '已删除' || NK.dispatchStatusKey(d) === 'revoked' || d.status === '已取消';
+/** 是否仍在正式推进流程（非已完成/撤销/取消/删除/草稿）。草稿未正式生成，不算推进中。 */
+NK.dispatchActive = (d) => !NK.dispatchInactive(d) && !NK.isDraft(d) && NK.dispatchStatusKey(d) !== 'completed';
 
 /**
  * 创建派单（核心：一次操作完成多项工作）
@@ -528,14 +570,24 @@ NK.createDispatch = (data) => {
     planDone: data.planDone || '',
     planDoneTime: data.planDoneTime || '',
     confirmAt: '', startAt: '', doneAt: '', feedbackAt: '',
-    status: '已生成',
+    sentAt: data.sentAt || '', completedAt: data.completedAt || '', revokedAt: data.revokedAt || '',
+    status: 'pending_send',      // 新派单统一从「待发送」开始
     latestFeedback: '', nextAction: '', result: '', acceptResult: '',
+    supplierFeedback: data.supplierFeedback || '',   // 供应商反馈（可选）
+    exceptionType: data.exceptionType || '',         // 异常类型
+    exceptionNote: data.exceptionNote || '',         // 异常说明
+    exceptionNext: data.exceptionNext || '',         // 异常下一步安排
+    completionNote: data.completionNote || '',       // 完成说明（可选）
+    legacyStatus: data.legacyStatus || '',           // 旧状态（迁移时保留）
+    migrationNote: data.migrationNote || '',         // 迁移备注（如"待花姐验收"待确认）
     workNo: data.workNo || '', projectId: data.projectId || '',
     creator: '花姐', updatedAt: nowIso,
     reminders: [], attachments: [], source: data.source || 'manual',
     msg: '', urgentCount: 0, kpiCounted: false,
   };
   NK.db.dispatches.push(dispatch);
+  // 派单状态历史：记录初始状态与创建时间（用于追溯）
+  NK.ensureStatusHistory(dispatch, 'pending_send', '创建派单');
 
   // 生成派单消息
   dispatch.msg = NK.renderDispatchMsg(dispatch);
@@ -559,8 +611,8 @@ NK.createDispatch = (data) => {
   NK.db.tasks.push(task);
   dispatch.taskId = task.id;
 
-  // 提醒花姐派单已生成，尚未标记发送
-  NK.addReminder('派单已生成', `${dispatch.no} ${dispatch.title} 已生成，尚未发送`, 'dispatch', dispatch.id);
+  // 提醒花姐派单已生成，处于"待发送"
+  NK.addReminder('派单待发送', `${dispatch.no} ${dispatch.title} 已创建，尚未发送给供应商`, 'dispatch', dispatch.id);
   NK.save();
   return dispatch;
 };
@@ -650,34 +702,73 @@ NK.activeTpl = () => {
   return t || NK.db.templates[0];
 };
 
-/** 状态流转（花姐单人模式：所有状态由花姐手动更新） */
+/** 记录派单状态历史（追加一条，不覆盖已有历史）。note 为该次操作说明。 */
+NK.ensureStatusHistory = (d, statusKey, note, at) => {
+  if (!d) return;
+  d.statusHistory = d.statusHistory || [];
+  const nowIso = at || NK.now();
+  const prev = d.statusHistory.length ? d.statusHistory[d.statusHistory.length - 1] : null;
+  // 避免完全重复的连续记录
+  if (prev && prev.to === statusKey && prev.note === note) return;
+  d.statusHistory.push({
+    from: prev ? prev.to : (d.legacyStatus || ''), fromLabel: prev ? prev.toLabel : (d.status || ''),
+    to: statusKey, toLabel: NK.DISPATCH_STATUS_LABEL[statusKey] || statusKey,
+    at: nowIso, note: note || '',
+  });
+};
+
+/** 状态流转（花姐单人模式：所有状态由花姐手动更新）。
+ * 新状态使用英文枚举：draft/pending_send/sent/exception/completed/revoked。
+ * 兼容旧中文状态：传入中文时自动映射为英文枚举。
+ * 记录时间戳（sentAt/completedAt/revokedAt）与状态历史。
+ */
 NK.setDispatchStatus = (d, status) => {
   const nowIso = NK.now();
-  const flow = NK.DISPATCH_FLOW;
-  const oldIdx = flow.indexOf(d.status);
-  const newIdx = flow.indexOf(status);
-  d.status = status;
+  const key = NK.DISPATCH_STATUS_KEY[status] || status; // 中文→英文枚举
+  const label = NK.DISPATCH_STATUS_LABEL[key] || key;
+  const prevKey = NK.dispatchStatusKey(d);
+  const prevLabel = NK.dispatchStatusLabel(d);
+  // 记录历史（含旧→新迁移追溯）
+  if (prevKey !== key) {
+    d.statusHistory = d.statusHistory || [];
+    d.statusHistory.push({
+      from: prevKey, fromLabel: prevLabel, to: key, toLabel: label,
+      at: nowIso, note: NK.STATUS_CHANGE_NOTE[key] || '',
+    });
+  }
+  d.status = key;
   d.updatedAt = nowIso;
-  // 时间戳记录
-  if (status === '已发送' && !d.sentAt) d.sentAt = nowIso;
-  if (status === '处理中' && !d.startAt) d.startAt = nowIso;
-  if (status === '待花姐验收' && !d.feedbackAt) d.feedbackAt = nowIso; // 花姐记录处理结果的时间
-  if (status === '已闭环') {
+  // 时间戳记录（首次进入才写入，避免重复）
+  if (key === 'sent' && !d.sentAt) d.sentAt = nowIso;
+  if (key === 'completed') {
     d.doneAt = d.doneAt || nowIso;
+    d.completedAt = d.completedAt || nowIso;
+    // 关联任务完成
     const t = NK.getTask(d.taskId);
-    if (t) { t.doneAt = nowIso; t.status = '已完成'; t.updatedAt = nowIso; }
+    if (t && t.status !== '已完成') { t.doneAt = nowIso; t.status = '已完成'; t.updatedAt = nowIso; }
+  }
+  if (key === 'revoked' && !d.revokedAt) d.revokedAt = nowIso;
+  if (key === 'exception' && !d.exceptionAt) d.exceptionAt = nowIso;
+  if (key === 'pending_send' && d.status === 'completed') {
+    // 重新打开：清除完成时间，恢复待发送态（由重新打开流程处理）
+    d.doneAt = ''; d.completedAt = '';
   }
   // 同步关联任务状态（按花姐的操作推进）
   const task = NK.getTask(d.taskId);
-  if (task && status !== '已闭环') {
+  if (task && key !== 'completed') {
     const map = {
-      '已生成': '待处理', '已发送': '待处理',
-      '跟进中': '处理中', '处理中': '处理中',
-      '等待外部条件': '处理中', '已处理': '待验收', '待花姐验收': '待验收'
+      'pending_send': '待处理', 'sent': '待处理',
+      'exception': '处理中', 'draft': '待处理'
     };
-    if (map[status]) { task.status = map[status]; task.updatedAt = nowIso; }
+    if (map[key]) { task.status = map[key]; task.updatedAt = nowIso; }
   }
   NK.save();
+  return d;
+};
+// 状态变化时的历史备注文案
+NK.STATUS_CHANGE_NOTE = {
+  pending_send: '标记待发送', sent: '标记已发送', completed: '标记完成',
+  exception: '记录异常', revoked: '撤销派单', draft: '保存草稿',
 };
 
 /** 更新派单反馈 */
@@ -700,10 +791,154 @@ NK.updateDispatchFeedback = (d, { feedback, nextAction, result, acceptResult, wo
 };
 
 /* ============================================================
-   派单撤销 / 软删除 / 回收站 / 恢复
-   核心原则：业务取消用"撤销"保留过程，录入错误用"删除"进回收站。
-   撤销/删除都不永久清库，不删除基础资料，不自动改正式KPI。
+   派单新流程操作（待发送 / 已发送 / 完成 / 异常 / 反馈 / 重新打开）
+   核心原则：正常只记录"发出"和"完成"；只有问题才进入异常处理。
    ============================================================ */
+
+/** 校验待发送派单的核心信息是否齐全（供应商/职场/原因/上门日期）。 */
+NK.dispatchSendCheck = (d) => {
+  const miss = [];
+  if (!NK.getSupplierOf(d)) miss.push('供应商');
+  if (!d.siteName && !d.siteId) miss.push('职场');
+  if (!d.desc && !d.title) miss.push('派单原因');
+  if (!d.visitDate) miss.push('上门日期');
+  return miss;
+};
+
+/** 标记已发送：校验必填后，将派单从待发送改为已发送，记录发送时间/操作人。 */
+NK.markDispatchSent = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return { ok: false, msg: '找不到这条派单' };
+  const key = NK.dispatchStatusKey(d);
+  if (key === 'revoked' || d.recordStatus === '已删除') return { ok: false, msg: '这条派单已撤销/已删除，无法标记已发送' };
+  if (key === 'completed') return { ok: false, msg: '这条派单已完成，无需再标记已发送' };
+  const miss = NK.dispatchSendCheck(d);
+  if (miss.length) return { ok: false, msg: `标记已发送前请先填写：${miss.join('、')}`, miss };
+  if (key !== 'sent') {
+    const nowIso = NK.now();
+    d.status = 'sent';
+    d.sentAt = d.sentAt || nowIso;
+    d.sentBy = '花姐';
+    d.updatedAt = nowIso;
+    NK.ensureStatusHistory(d, 'sent', '标记已发送', nowIso);
+  }
+  // 若此前为异常待处理，恢复正常已发送时清除异常标记（保留异常记录用于追溯）
+  d.exceptionType = ''; d.exceptionNote = ''; d.exceptionNext = '';
+  // 关联任务置为待处理（若被标为处理中）
+  const t = NK.getTask(d.taskId);
+  if (t && t.status !== '已完成') { t.status = '待处理'; t.updatedAt = NK.now(); }
+  NK.save();
+  return { ok: true, msg: `花姐，这条派单已记录为发给${NK.dispatchSupplierLabel(d)}，接下来按上门日期关注即可。` };
+};
+
+/** 标记完成：已发送/异常待处理 → 已完成，记录完成时间与可选完成说明。 */
+NK.markDispatchCompleted = (id, note) => {
+  const d = NK.getDispatch(id);
+  if (!d) return { ok: false, msg: '找不到这条派单' };
+  const key = NK.dispatchStatusKey(d);
+  if (key === 'completed') return { ok: false, msg: '这条派单已经是完成状态了' };
+  if (key === 'revoked' || d.recordStatus === '已删除') return { ok: false, msg: '这条派单已撤销/已删除，无法标记完成' };
+  const nowIso = NK.now();
+  d.status = 'completed';
+  d.doneAt = d.doneAt || nowIso;
+  d.completedAt = d.completedAt || nowIso;
+  d.completedBy = '花姐';
+  if (note != null && note !== '') d.completionNote = note;
+  d.updatedAt = nowIso;
+  NK.ensureStatusHistory(d, 'completed', note ? `标记完成：${note}` : '标记完成', nowIso);
+  // 关联任务完成
+  const t = NK.getTask(d.taskId);
+  if (t && t.status !== '已完成') { t.doneAt = nowIso; t.status = '已完成'; t.updatedAt = nowIso; }
+  NK.save();
+  return { ok: true, msg: '花姐，这条派单已经完成，顺利收尾。✅' };
+};
+
+/** 记录供应商反馈（可选，字段全部可选；不改派单状态，除非反馈含异常花姐另行记录异常）。 */
+NK.recordSupplierFeedback = (id, data) => {
+  const d = NK.getDispatch(id);
+  if (!d) return { ok: false, msg: '找不到这条派单' };
+  data = data || {};
+  const nowIso = NK.now();
+  d.supplierFeedback = data.content || d.supplierFeedback || '';
+  d.supplierFeedbackList = d.supplierFeedbackList || [];
+  d.supplierFeedbackList.push({
+    content: data.content || '',
+    person: data.person || '',
+    phone: data.phone || '',
+    changedVisitDate: data.changedVisitDate || '',
+    at: nowIso,
+  });
+  if (data.person != null) d.supplierPerson = data.person;
+  if (data.phone != null) d.supplierPhone = data.phone;
+  // 若反馈中变更了预计上门日期，同步更新 visitDate 并记录历史
+  if (data.changedVisitDate && d.visitDate !== data.changedVisitDate) {
+    const prev = d.visitDate || '';
+    d.visitDateHistory = d.visitDateHistory || [];
+    d.visitDateHistory.push({ from: prev || '未填写', to: data.changedVisitDate, at: nowIso, note: '供应商反馈调整' });
+    d.visitDate = data.changedVisitDate;
+    d.visitDateUpdatedAt = nowIso;
+  }
+  d.updatedAt = nowIso;
+  NK.save();
+  return { ok: true, msg: '花姐，已记录供应商反馈。' };
+};
+
+/** 记录异常：已发送/待发送 → 异常待处理。保留原供应商/上门日期/派单信息。 */
+NK.recordDispatchException = (id, data) => {
+  const d = NK.getDispatch(id);
+  if (!d) return { ok: false, msg: '找不到这条派单' };
+  const key = NK.dispatchStatusKey(d);
+  if (key === 'completed') return { ok: false, msg: '这条派单已完成，无需记录异常' };
+  if (key === 'revoked' || d.recordStatus === '已删除') return { ok: false, msg: '这条派单已撤销/已删除' };
+  data = data || {};
+  const nowIso = NK.now();
+  d.status = 'exception';
+  d.exceptionType = data.type || '其他';
+  d.exceptionNote = data.note || '';
+  d.exceptionNext = data.nextStep || '';
+  d.exceptionAt = d.exceptionAt || nowIso;
+  d.updatedAt = nowIso;
+  NK.ensureStatusHistory(d, 'exception', `记录异常：${d.exceptionType}`, nowIso);
+  // 关联任务标记处理中
+  const t = NK.getTask(d.taskId);
+  if (t && t.status !== '已完成') { t.status = '处理中'; t.updatedAt = nowIso; }
+  NK.save();
+  return { ok: true, msg: '该派单存在异常，请确认新的处理安排。' };
+};
+
+/** 处理异常：根据花姐选择的结果推进。result: 'resolve'恢复已发送 | 'done'标记完成 | 'revoke'标记撤销 */
+NK.resolveDispatchException = (id, result, note) => {
+  const d = NK.getDispatch(id);
+  if (!d) return { ok: false, msg: '找不到这条派单' };
+  if (NK.dispatchStatusKey(d) !== 'exception') return { ok: false, msg: '这条派单当前不是异常待处理状态' };
+  if (result === 'done') {
+    return NK.markDispatchCompleted(id, note);
+  }
+  if (result === 'revoke') {
+    return NK.revokeDispatch(id, { reason: note || '异常无法解决，撤销派单', cancelTask: true });
+  }
+  // resolve：异常已解决，恢复已发送
+  return NK.markDispatchSent(id);
+};
+
+/** 重新打开已完成派单：二次确认后，已发送恢复流程（不清除历史/完成说明）。 */
+NK.reopenDispatch = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return { ok: false, msg: '找不到这条派单' };
+  if (NK.dispatchStatusKey(d) !== 'completed') return { ok: false, msg: '这条派单不是已完成状态，无需重新打开' };
+  const nowIso = NK.now();
+  d.status = 'sent';
+  d.reopenedAt = nowIso;
+  d.doneAt = '';
+  d.completedAt = '';
+  d.updatedAt = nowIso;
+  NK.ensureStatusHistory(d, 'sent', '重新打开（回到已发送）', nowIso);
+  // 关联任务重新打开
+  const t = NK.getTask(d.taskId);
+  if (t && t.status === '已完成') { t.status = '待处理'; t.doneAt = ''; t.updatedAt = nowIso; }
+  NK.save();
+  return { ok: true, msg: `花姐，派单 ${d.no} 已重新打开，回到已发送状态。` };
+};
 
 /**
  * 撤销派单（业务取消，保留记录）。
@@ -719,13 +954,14 @@ NK.revokeDispatch = (id, opts = {}) => {
   const d = NK.getDispatch(id);
   if (!d) return { ok: false, msg: '找不到这条派单' };
   if (d.recordStatus === '已删除') return { ok: false, msg: '这条派单已在回收站，请先恢复再撤销' };
-  if (d.status === '已撤销') return { ok: false, msg: '这条派单已经撤销过了' };
+  if (NK.dispatchStatusKey(d) === 'revoked') return { ok: false, msg: '这条派单已经撤销过了' };
   const nowIso = NK.now();
-  d.status = '已撤销';
+  d.status = 'revoked';
   d.revokeReason = opts.reason || '其他';
   d.revokedAt = nowIso;
   d.revokedBy = '花姐';
   d.updatedAt = nowIso;
+  NK.ensureStatusHistory(d, 'revoked', '撤销派单', nowIso);
   // 清空下次跟进提醒，停止催办
   d.nextFollowup = '';
   let taskCancelled = false;
@@ -772,8 +1008,9 @@ NK.softDeleteDispatch = (id, opts = {}) => {
   if (!d) return { ok: false, msg: '找不到这条派单' };
   if (d.recordStatus === '已删除') return { ok: false, msg: '这条派单已在回收站中' };
   // 已产生处理记录的状态：默认禁止普通删除，引导用撤销
-  const processed = ['已发送', '跟进中', '处理中', '等待外部条件', '已处理', '待花姐验收', '已闭环'];
-  if (processed.includes(d.status) && !opts.force) {
+  const processed = ['sent', 'exception', 'completed']; // 已发送/异常待处理/已完成视为已产生处理记录
+  const dkey = NK.dispatchStatusKey(d);
+  if (processed.includes(dkey) && !opts.force) {
     return {
       ok: false, blocked: true, canRevoke: true,
       msg: '该派单已经产生处理记录，建议使用"撤销派单"保留过程留痕。',
@@ -825,13 +1062,14 @@ NK.restoreDispatch = (id) => {
 NK.unrevokeDispatch = (id) => {
   const d = NK.getDispatch(id);
   if (!d) return { ok: false, msg: '找不到这条派单' };
-  if (d.status !== '已撤销') return { ok: false, msg: '这条派单当前不是已撤销状态' };
+  if (d.status !== 'revoked') return { ok: false, msg: '这条派单当前不是已撤销状态' };
   const nowIso = NK.now();
-  d.status = '已生成';
+  d.status = 'pending_send';
   d.revokeReason = '';
   d.revokedAt = '';
   d.revokedBy = '';
   d.updatedAt = nowIso;
+  NK.ensureStatusHistory(d, 'pending_send', '恢复派单（重新进入待发送）', nowIso);
   // 恢复关联任务（若任务被取消则恢复为待处理）
   const t = NK.getTask(d.taskId);
   if (t) {
@@ -1157,12 +1395,7 @@ NK.autoKpi = (engineerName, month) => {
         out.deductTotal += pts;
       }
     }
-    // 超时
-    if (d.planDone && d.status !== '已闭环' && NK.today() > d.planDone) {
-      const pts = (rules.items.find(i => i.id === 'execution') || {}).rules?.[0]?.points || -5;
-      out.overdue.push({ ref: d.no });
-      out.deductTotal += pts;
-    }
+    // 派单不自动因上门日期超时扣分（上门日期已过不自动判失败，不自动认定驻场工程师责任）
   });
   tasks.forEach(t => {
     if (t.dueDate && t.status !== '已完成' && NK.today() > t.dueDate) {
@@ -1208,21 +1441,38 @@ NK.genReminders = () => {
       list.push({ id: 'R-' + t.id + '-soon', level: 'warn', title: '距截止不足24小时', content: `${t.no} ${t.name} 今日到期`, actions: [{ label: '查看', act: 'task', arg: t.id }] });
     }
   });
-  // 4. 派单未标记已发送（生成后花姐还未发送）—— 已撤销/已删除/已取消的派单不产生告警
+  // 4. 派单提醒 —— 只提醒需要花姐关注的事项：待发送 / 明日上门 / 今日上门 / 上门日期已过未完成 / 异常待处理 / 需补位未创建
+  //    正常已发送未临近、已完成、已撤销、已删除不产生告警
   NK.db.dispatches.forEach(d => {
-    if (NK.dispatchInactive(d)) return;
-    if (d.status === '已生成') {
-      list.push({ id: 'R-' + d.id, level: 'warn', title: '派单已生成待发送', content: `${d.no} ${d.title}（${d.engineer || '未指派'}）`, actions: [{ label: '复制并发送', act: 'dispatch', arg: d.id }] });
+    if (NK.dispatchInactive(d)) return; // 已撤销/已删除/已取消
+    const key = NK.dispatchStatusKey(d);
+    if (key === 'completed') return; // 已完成不提醒
+    if (key === 'draft') return; // 草稿不进入正式提醒
+    if (key === 'pending_send') {
+      list.push({ id: 'R-' + d.id, level: 'warn', title: '派单待发送', content: `${d.no} ${d.title}（${d.supplierName || '未选供应商'}）`, actions: [{ label: '标记已发送', act: 'dispatch', arg: d.id }] });
+      return;
     }
-    if (d.status === '待花姐验收') {
-      list.push({ id: 'R-' + d.id + '-acc', level: 'accent', title: '派单等待花姐验收', content: `${d.no} ${d.title} 已处理完成`, actions: [{ label: '立即验收', act: 'dispatch', arg: d.id }] });
+    if (key === 'exception') {
+      list.push({ id: 'R-' + d.id + '-exc', level: 'warn', title: '派单异常待处理', content: `${d.no} ${d.title}（${d.supplierName || '未选供应商'}）存在异常，请确认后续安排`, actions: [{ label: '处理异常', act: 'dispatch', arg: d.id }] });
+      return;
     }
-    // 4a. 下次跟进时间已到（花姐设置的跟进提醒）
-    if (d.nextFollowup && d.status !== '已闭环') {
-      const due = new Date(d.nextFollowup).getTime();
-      if (due <= Date.now()) {
-        list.push({ id: 'R-' + d.id + '-nf', level: 'warn', title: '到点跟进派单', content: `${d.no} ${d.title}（${d.engineer || '未指派'}）`, actions: [{ label: '记录进展', act: 'dispatch', arg: d.id }] });
+    // key === 'sent'：按上门日期生成轻量提醒
+    if (d.visitDate) {
+      const diff = NK.daysBetween(today, d.visitDate);
+      if (diff === 0) {
+        list.push({ id: 'R-' + d.id + '-visit', level: 'warn', title: '今日上门', content: `${d.no} ${d.title} 今日（${d.visitDate}）上门，供应商：${d.supplierName || '—'}`, actions: [{ label: '查看派单', act: 'dispatch', arg: d.id }] });
+      } else if (diff === 1) {
+        list.push({ id: 'R-' + d.id + '-visit1', level: 'warn', title: '明日上门', content: `${d.no} ${d.title} 明日（${d.visitDate}）上门，供应商：${d.supplierName || '—'}`, actions: [{ label: '查看派单', act: 'dispatch', arg: d.id }] });
+      } else if (diff < 0) {
+        list.push({ id: 'R-' + d.id + '-visitov', level: 'warn', title: '上门日期已过，请确认是否完成', content: `${d.no} ${d.title} 计划 ${d.visitDate} 上门，请确认是否已经完成`, actions: [{ label: '确认完成', act: 'dispatch', arg: d.id }] });
       }
+      // diff > 1：上门日期还早，正常已发送不提醒
+    }
+  });
+  // 4a. 休假补位：需创建补位派单但尚未创建的休假记录提醒
+  (NK.db.leaves || []).forEach(l => {
+    if (l.dispatchStatus === '待创建派单') {
+      list.push({ id: 'R-' + l.id + '-cover', level: 'warn', title: '需补位未创建派单', content: `${l.engineer || '—'} ${l.date || ''} 休假，请创建补位派单`, actions: [{ label: '新建补位派单', act: 'dispatch', arg: 'new' }] });
     }
   });
   // 5. 专项风险
@@ -1422,94 +1672,91 @@ NK.genFocusItems = () => {
     });
   });
 
-  // ── 3. 已发送但30min以上无跟进记录 ──────────────────────
+  // ── 3. 派单重点事项（待发送 / 异常待处理 / 上门日期提醒）─────
   NK.db.dispatches.forEach(d => {
     if (NK.dispatchInactive(d)) return;
-    if (d.status !== '已发送') return;
-    const ms = now - new Date(d.sentAt || d.createdAt).getTime();
-    if (ms < 30 * 60000) return; // 不到30分钟不催
-    const wait = NK.humanDur(ms);
-    const longWait = ms >= 60 * 60000; // 超过1小时
-    add({
-      id: 'd-conf-' + d.id,
-      type: 'dispatch',
-      itemId: d.id,
-      tag: longWait ? '超30分钟无跟进' : '待跟进',
-      tagLevel: longWait ? 'danger' : 'warn',
-      title: d.title,
-      line1: `${NK.v.siteName(d.siteName)} · ${NK.v.engName(d.engineer)} 尚未更新进展`,
-      line2: `已等待 ${wait} 无新进展`,
-      line3: longWait ? '建议立即催一次' : '建议跟进一下进展',
-      actionBtn: '催一下',
-      actionAct: `NK.quickRemind('${d.id}')`,
-    });
-  });
-
-  // ── 4. 跟进中/处理中派单2h以上无更新记录 ──────────────────
-  NK.db.dispatches.forEach(d => {
-    if (NK.dispatchInactive(d)) return;
-    if (!['跟进中', '处理中'].includes(d.status)) return;
-    const lastUpdate = d.updatedAt;
-    if (!lastUpdate) return;
-    const ms = now - new Date(lastUpdate).getTime();
-    if (ms < 2 * 3600000) return; // 不到2小时
-    const wait = NK.humanDur(ms);
-    const lastFb = d.latestFeedback || '暂无进展记录';
-    add({
-      id: 'd-fb-' + d.id,
-      type: 'dispatch',
-      itemId: d.id,
-      tag: '待跟进',
-      tagLevel: 'warn',
-      title: d.title,
-      line1: `${NK.v.engName(d.engineer)} 处理中，最新进展：${lastFb.slice(0, 20)}${lastFb.length > 20 ? '…' : ''}`,
-      line2: `${wait} 没有新进展记录`,
-      line3: '建议主动问一次进度',
-      actionBtn: '问进度',
-      actionAct: `NK.quickRemind('${d.id}')`,
-    });
-  });
-
-  // ── 5. 等待外部条件派单（可提醒花姐确认是否解除）─────────
-  NK.db.dispatches.forEach(d => {
-    if (NK.dispatchInactive(d)) return;
-    if (d.status !== '等待外部条件') return;
-    const wait = NK.humanDur(now - new Date(d.updatedAt).getTime());
-    add({
-      id: 'd-wait-' + d.id,
-      type: 'dispatch',
-      itemId: d.id,
-      tag: '等待外部条件',
-      tagLevel: 'warn',
-      title: d.title,
-      line1: `${NK.v.siteName(d.siteName)} · ${NK.v.engName(d.engineer)}`,
-      line2: `已等待 ${wait}，当前卡点：${d.nextAction || '等待外部条件'}`,
-      line3: '确认条件是否已解除',
-      actionBtn: '更新状态',
-      actionAct: `UI.dispatchDetail('${d.id}')`,
-    });
-  });
-
-  // ── 6. 等花姐验收的派单 ──────────────────────────────────
-  NK.db.dispatches.forEach(d => {
-    if (NK.dispatchInactive(d)) return;
-    if (d.status !== '待花姐验收') return;
-    const ms = now - new Date(d.feedbackAt || d.updatedAt).getTime();
-    const wait = ms > 0 ? NK.humanDur(ms) : '刚刚';
-    const sub = d.result || '处理结果已记录，等待花姐验收';
-    add({
-      id: 'd-acc-' + d.id,
-      type: 'dispatch',
-      itemId: d.id,
-      tag: '待验收',
-      tagLevel: 'accent',
-      title: d.title,
-      line1: `${NK.v.siteName(d.siteName)} · ${NK.v.engName(d.engineer)}`,
-      line2: sub.slice(0, 40) + (sub.length > 40 ? '…' : ''),
-      line3: `等待花姐验收 ${wait}`,
-      actionBtn: '立即验收',
-      actionAct: `UI.dispatchDetail('${d.id}')`,
-    });
+    const key = NK.dispatchStatusKey(d);
+    if (key === 'completed' || key === 'draft') return;
+    const sup = d.supplierName || '未选供应商';
+    if (key === 'pending_send') {
+      add({
+        id: 'd-send-' + d.id,
+        type: 'dispatch',
+        itemId: d.id,
+        tag: '待发送',
+        tagLevel: 'warn',
+        title: d.title,
+        line1: `${NK.v.siteName(d.siteName)} · ${sup}`,
+        line2: d.visitDate ? `计划 ${d.visitDate} 上门，尚未发送给供应商` : '尚未填写上门日期',
+        line3: '记得发给供应商',
+        actionBtn: '标记已发送',
+        actionAct: `UI.dispatchDetail('${d.id}')`,
+      });
+      return;
+    }
+    if (key === 'exception') {
+      add({
+        id: 'd-exc-' + d.id,
+        type: 'dispatch',
+        itemId: d.id,
+        tag: '异常待处理',
+        tagLevel: 'danger',
+        title: d.title,
+        line1: `${NK.v.siteName(d.siteName)} · ${sup}`,
+        line2: d.exceptionNote || '该派单存在异常，请确认新的处理安排',
+        line3: '请确认后续安排',
+        actionBtn: '处理异常',
+        actionAct: `UI.dispatchDetail('${d.id}')`,
+      });
+      return;
+    }
+    // key === 'sent'：上门日期提醒
+    if (d.visitDate) {
+      const diff = NK.daysBetween(today, d.visitDate);
+      if (diff === 0) {
+        add({
+          id: 'd-visit-' + d.id,
+          type: 'dispatch',
+          itemId: d.id,
+          tag: '今日上门',
+          tagLevel: 'accent',
+          title: d.title,
+          line1: `${NK.v.siteName(d.siteName)} · ${sup}`,
+          line2: `今日 ${d.visitDate} 上门`,
+          line3: '今日按计划上门',
+          actionBtn: '查看派单',
+          actionAct: `UI.dispatchDetail('${d.id}')`,
+        });
+      } else if (diff === 1) {
+        add({
+          id: 'd-visit1-' + d.id,
+          type: 'dispatch',
+          itemId: d.id,
+          tag: '明日上门',
+          tagLevel: 'accent',
+          title: d.title,
+          line1: `${NK.v.siteName(d.siteName)} · ${sup}`,
+          line2: `明日 ${d.visitDate} 上门`,
+          line3: '明天按计划上门',
+          actionBtn: '查看派单',
+          actionAct: `UI.dispatchDetail('${d.id}')`,
+        });
+      } else if (diff < 0) {
+        add({
+          id: 'd-visitov-' + d.id,
+          type: 'dispatch',
+          itemId: d.id,
+          tag: '上门已过',
+          tagLevel: 'danger',
+          title: d.title,
+          line1: `${NK.v.siteName(d.siteName)} · ${sup}`,
+          line2: `计划 ${d.visitDate} 上门，日期已过`,
+          line3: '上门日期已过，请确认是否已经完成',
+          actionBtn: '确认完成',
+          actionAct: `UI.dispatchDetail('${d.id}')`,
+        });
+      }
+    }
   });
 
   // ── 7. 24小时内到期的任务 ─────────────────────────────────
@@ -1606,14 +1853,20 @@ NK.genHandover = (startDate, endDate, opts) => {
       sec.daily.push({ name: t.name, requirement: t.requirement, priority: t.priority });
     }
   });
-  // 派单
+  // 派单（新状态：正常推进 pending_send/sent；异常 exception 单独归入等待处理）
   NK.db.dispatches.forEach(d => {
-    if (d.status === '已闭环' || NK.dispatchInactive(d)) return;
-    if (d.planDone && d.planDone >= s && d.planDone <= e) sec.dispatchingDue.push(d);
-    else if (d.status !== '已闭环') sec.dispatching.push(d);
-    if (['跟进中','处理中'].includes(d.status)) sec.waitingFeedback.push(d);
-    if (d.status === '待花姐验收') sec.waitingAccept.push(d);
-    if (d.planDone && NK.today() > d.planDone && d.status !== '已闭环') sec.overdue.push(d);
+    if (NK.dispatchInactive(d)) return;
+    const key = NK.dispatchStatusKey(d);
+    if (key === 'completed' || key === 'draft') return;
+    if (key === 'exception') {
+      sec.waitingAccept.push(d);
+      if (d.visitDate && NK.today() > d.visitDate) sec.overdue.push(d);
+      return;
+    }
+    // pending_send / sent
+    if (d.visitDate && d.visitDate >= s && d.visitDate <= e) sec.dispatchingDue.push(d);
+    else sec.dispatching.push(d);
+    if (d.visitDate && NK.today() > d.visitDate) sec.overdue.push(d);
   });
   // 任务
   NK.db.tasks.forEach(t => {
@@ -1658,15 +1911,15 @@ NK.renderHandoverText = (sec, meta) => {
   line('');
   line(`【进行中的派单】`);
   if (!sec.dispatching.length) line(`  （无）`);
-  sec.dispatching.forEach(d => line(`  • [${d.priority}] ${d.no} ${d.title} 状态:${d.status} 负责工程师:${d.engineer || '—'} 最新进展:${d.latestFeedback || '无'}`));
+  sec.dispatching.forEach(d => line(`  • [${d.priority}] ${d.no} ${d.title} 状态:${NK.dispatchStatusLabel(d)} 负责工程师:${d.engineer || '—'} 最新进展:${d.latestFeedback || '无'}`));
   line('');
   line(`【等待花姐跟进】`);
   if (!sec.waitingFeedback.length) line(`  （无）`);
   sec.waitingFeedback.forEach(d => line(`  • ${d.no || d.id} ${d.title || d.name} 状态:${d.status}`));
   line('');
-  line(`【等待花姐验收】`);
+  line(`【异常待处理】`);
   if (!sec.waitingAccept.length) line(`  （无）`);
-  sec.waitingAccept.forEach(d => line(`  • ${d.no || d.id} ${d.title || d.name}`));
+  sec.waitingAccept.forEach(d => line(`  • ${d.no || d.id} ${d.title || d.name} 状态:${NK.dispatchStatusLabel(d) || d.status}`));
   line('');
   line(`【已超时】`);
   if (!sec.overdue.length) line(`  （无）`);
@@ -1744,7 +1997,9 @@ NK.assistantReply = (q) => {
     const rem = NK.genReminders();
     const urgent = rem.filter(x => x.level === 'danger');
     const disps = NK.db.dispatches.filter(d => !NK.dispatchInactive(d));
-    r.push(`花姐，今天共 ${rem.length} 项提醒：P1/超时 ${urgent.length} 项、已生成待发送 ${disps.filter(d => d.status === '已生成').length} 项、待验收 ${disps.filter(d => d.status === '待花姐验收').length} 项。`);
+    const pendSend = disps.filter(d => NK.dispatchStatusKey(d) === 'pending_send');
+    const exc = disps.filter(d => NK.dispatchStatusKey(d) === 'exception');
+    r.push(`花姐，今天共 ${rem.length} 项提醒：P1/超时 ${urgent.length} 项、待发送派单 ${pendSend.length} 项、异常待处理 ${exc.length} 项。`);
     if (urgent.length) r.push(`优先级最高的：${urgent.slice(0, 3).map(u => u.title + '·' + u.content).join('；')}，花姐优先处理一下 👀`);
     else r.push('花姐，今天没有超时事项 ✨ 运维节奏良好，继续保持～');
   }
@@ -1770,10 +2025,10 @@ NK.assistantReply = (q) => {
   }
   // 待办
   if (/待办|待确认|待验收|要做什么/.test(q)) {
-    const disps = NK.db.dispatches.filter(d => d.status === '已生成' && !NK.dispatchInactive(d));
-    const acc = NK.db.dispatches.filter(d => d.status === '待花姐验收' && !NK.dispatchInactive(d));
-    r.push(`花姐，当前有这些待处理事项：\n已生成待发送 ${disps.length} 项：${disps.slice(0, 5).map(d => `${d.no} ${d.title}`).join('；') || '无'}。\n待验收 ${acc.length} 项：${acc.slice(0, 5).map(d => `${d.no} ${d.title}`).join('；') || '无'}。`);
-    if (!disps.length && !acc.length) r.push('花姐，今天的待办都处理完啦 ✨');
+    const disps = NK.db.dispatches.filter(d => NK.dispatchStatusKey(d) === 'pending_send' && !NK.dispatchInactive(d));
+    const exc = NK.db.dispatches.filter(d => NK.dispatchStatusKey(d) === 'exception' && !NK.dispatchInactive(d));
+    r.push(`花姐，当前有这些待处理事项：\n待发送派单 ${disps.length} 项：${disps.slice(0, 5).map(d => `${d.no} ${d.title}`).join('；') || '无'}。\n异常待处理 ${exc.length} 项：${exc.slice(0, 5).map(d => `${d.no} ${d.title}`).join('；') || '无'}。`);
+    if (!disps.length && !exc.length) r.push('花姐，今天的待办都处理完啦 ✨');
   }
   // 派单创建指引
   if (/派单|湖州|打印机|故障/.test(q) && !cityM) {

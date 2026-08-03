@@ -13,8 +13,8 @@ UI.statusBadge = (st) => {
     '已完成': 'done', '已关闭': 'done', '已闭环': 'done', '处理中': 'proc', '已确认': 'proc', '已分配': 'proc', '已处理': 'proc', '跟进中': 'proc',
     '待反馈': 'wait', '待我验收': 'wait', '待工程师确认': 'wait', '待验收': 'wait', '等待反馈': 'wait', '等待验收': 'wait',
     '已发送': 'wait', '等待外部条件': 'wait', '待花姐验收': 'wait',
-    '待处理': 'gray', '草稿': 'gray', '待派单': 'gray', '未开始': 'gray', '已暂停': 'gray', '已取消': 'gray', '已生成': 'gray',
-    '有风险': 'risk', '已超时': 'risk', '升级处理': 'risk', '计划撤场': 'risk', '已撤场': 'risk', '搬迁中': 'risk',
+    '待处理': 'gray', '草稿': 'gray', '待派单': 'gray', '未开始': 'gray', '已暂停': 'gray', '已取消': 'gray', '已生成': 'gray', '待发送': 'gray', '已撤销': 'gray',
+    '异常待处理': 'risk', '有风险': 'risk', '已超时': 'risk', '升级处理': 'risk', '计划撤场': 'risk', '已撤场': 'risk', '搬迁中': 'risk',
     '进行中': 'accent', '计划搬迁': 'accent',
   };
   const cls = map[st] || 'gray';
@@ -327,7 +327,7 @@ UI.refreshBadges = () => {
   const n1 = document.getElementById('navBadgeDispatch');
   const n2 = document.getElementById('navBadgeTasks');
   const n3 = document.getElementById('navBadgeNotes');
-  const waitCount = NK.db.dispatches.filter(x => x.status === '已生成' && !NK.dispatchInactive(x)).length;
+  const waitCount = NK.db.dispatches.filter(x => !NK.dispatchInactive(x) && ['pending_send', 'exception'].includes(NK.dispatchStatusKey(x))).length;
   n1.textContent = waitCount; n1.classList.toggle('hidden', !waitCount);
   n2.textContent = d; n2.classList.toggle('hidden', !d);
   const notesCount = (NK.db.quickNotes || []).filter(x => !x.archived && !x.deleted).length;
@@ -371,8 +371,8 @@ UI.renderHome = () => {
 
   // ── 区域2：轻量状态概览 ──────────────────────────────
   const p1 = rem.filter(x => x.level === 'danger').length;
-  const waitSend = disps.filter(d => d.status === '已生成').length;
-  const waitAccept = disps.filter(d => d.status === '待花姐验收').length;
+  const waitSend = disps.filter(d => NK.dispatchStatusKey(d) === 'pending_send').length;
+  const waitExc = disps.filter(d => NK.dispatchStatusKey(d) === 'exception').length;
   const overdue = rem.filter(x => x.title.includes('超时')).length;
 
   // ── 区域3：横向轻量快捷入口条 ──────────────────────────────
@@ -465,7 +465,7 @@ UI.renderHome = () => {
   const dispOnDay = (dateStr) =>
     disps.filter(d =>
       (d.planArrive || '') === dateStr &&
-      !['已闭环', '草稿'].includes(d.status)
+      !['completed', 'draft', 'revoked'].includes(NK.dispatchStatusKey(d))
     );
   const dispsOnDay = dispOnDay(today);
   dispsOnDay.forEach(d => {
@@ -473,10 +473,10 @@ UI.renderHome = () => {
       sort: (d.planArriveTime || (d.planArrive || today) + 'T12:00').replace(/.*T/, '').slice(0, 5).replace(':', ''),
       time: d.planArriveTime ? d.planArriveTime.slice(0, 5) : (d.planArrive || today).slice(5),
       name: `${NK.v.siteName(d.siteName)} 派单`,
-      sub: `${NK.v.engName(d.engineer)} · ${UI.statusBadge(d.status)}`,
+      sub: `${NK.v.engName(d.engineer)} · ${UI.statusBadge(NK.dispatchStatusLabel(d))}`,
       pri: null, type: 'dispatch',
       click: `UI.dispatchDetail('${d.id}')`,
-      done: d.status === '已闭环',
+      done: NK.dispatchStatusKey(d) === 'completed',
     });
   });
   tl.sort((a, b) => a.sort.localeCompare(b.sort));
@@ -525,9 +525,9 @@ UI.renderHome = () => {
     <div class="dash-zone dash-status">
       ${p1 > 0 ? `<span class="ds-pill ds-risk" onclick="UI.nav('tasks')"><span class="ds-dot"></span>P1待处理 <strong>${p1}</strong></span>` : ''}
       ${waitSend > 0 ? `<span class="ds-pill ds-warn" onclick="UI.nav('dispatch')"><span class="ds-dot"></span>待发送 <strong>${waitSend}</strong></span>` : ''}
-      ${waitAccept > 0 ? `<span class="ds-pill ds-info" onclick="UI.nav('dispatch')"><span class="ds-dot"></span>待花姐验收 <strong>${waitAccept}</strong></span>` : ''}
+      ${waitExc > 0 ? `<span class="ds-pill ds-info" onclick="UI.nav('dispatch')"><span class="ds-dot"></span>异常待处理 <strong>${waitExc}</strong></span>` : ''}
       ${overdue > 0 ? `<span class="ds-pill ds-danger" onclick="UI.nav('tasks')"><span class="ds-dot"></span>已超时 <strong>${overdue}</strong></span>` : ''}
-      ${!p1 && !waitSend && !waitAccept && !overdue ? '<span class="ds-all-ok">✓ 当前无紧急事项，运维节奏良好 ✨</span>' : ''}
+      ${!p1 && !waitSend && !waitExc && !overdue ? '<span class="ds-all-ok">✓ 当前无紧急事项，运维节奏良好 ✨</span>' : ''}
     </div>
     ${UI.leaveRemindHTML()}
     <div class="dash-zone dash-quick">
@@ -662,10 +662,10 @@ UI.renderDispatch = (filterArg) => {
   // 默认"全部"不包含已删除记录；仅在"已删除"筛选中显示回收站内容
   const showDeleted = f.status === '已删除';
   list = list.filter(d => (d.recordStatus === '已删除') === showDeleted);
-  if (f.status && f.status !== '全部' && f.status !== '已删除') list = list.filter(d => d.status === f.status);
+  if (f.status && f.status !== '全部' && f.status !== '已删除') list = list.filter(d => NK.dispatchStatusLabel(d) === f.status);
   if (f.priority && f.priority !== '全部') list = list.filter(d => d.priority === f.priority);
   if (f.q) list = list.filter(d => `${d.no} ${d.title} ${d.city} ${d.engineer} ${d.contactName}`.includes(f.q));
-  if (f.overdue) list = list.filter(d => d.planDone && d.planDone < today && d.status !== '已闭环' && d.status !== '已取消');
+  if (f.overdue) list = list.filter(d => d.visitDate && d.visitDate < today && !['completed', 'revoked'].includes(NK.dispatchStatusKey(d)) && d.recordStatus !== '已删除');
   // 上门日期范围筛选：与花姐助手共享同一套逻辑（NK.filterByVisitRange），保证数量一致
   list = NK.filterByVisitRange(list, f.visitStart, f.visitEnd);
   // 供应商筛选：与花姐助手共享同一套逻辑（NK.filterBySupplier），保证数量一致
@@ -673,7 +673,7 @@ UI.renderDispatch = (filterArg) => {
   const _vs = (f.visitStart || '').trim(), _ve = (f.visitEnd || '').trim();
   const _sup = (f.supplier || '').trim() || '全部供应商';
 
-  const statusOpts = ['全部', '已删除', ...NK.DISPATCH_STATUS, '已取消', '已暂停', '已撤销'];
+  const statusOpts = ['全部', '已删除', ...NK.DISPATCH_STATUS];
   const priOpts = ['全部', 'P1', 'P2', 'P3'];
   const supOpts = ['全部供应商', '源晨', '亚北', '未标注'];
 
@@ -763,18 +763,22 @@ UI.renderDispatch = (filterArg) => {
         const disp = NK.v.dispatch(d);
         const inactive = NK.dispatchInactive(d) || d.recordStatus === '已删除';
         const rowDim = inactive ? ' style="opacity:.62;filter:grayscale(.4)"' : '';
-        // 操作按钮：详情始终；催办仅正常待发送；更多菜单（撤销/删除）仅未撤销未删除记录；已撤销可恢复；回收站内可恢复/永久删除
+        // 操作按钮：详情始终；快捷操作按状态显示；更多菜单（撤销/删除）仅未撤销未删除记录；已撤销可恢复；回收站内可恢复/永久删除
+        const dkey = NK.dispatchStatusKey(d);
         let ops = `<button class="btn btn-sm" onclick="UI.dispatchDetail('${d.id}')">详情</button>`;
-        if (d.status === '已生成' && !inactive) {
-          ops += `<button class="btn btn-sm btn-warn" onclick="UI.dispatchUrgent('${d.id}')">催办</button>`;
+        if (dkey === 'pending_send' && !inactive) {
+          ops += `<button class="btn btn-sm btn-accent" onclick="UI.dispatchMarkSent('${d.id}')">标记已发送</button>`;
         }
-        if (d.status === '待花姐验收' && !inactive) {
-          ops += `<button class="btn btn-sm btn-accent" onclick="UI.dispatchAccept('${d.id}')">验收</button>`;
+        if (dkey === 'exception' && !inactive) {
+          ops += `<button class="btn btn-sm btn-warn" onclick="UI.dispatchResolveException('${d.id}')">处理异常</button>`;
+        }
+        if (dkey === 'completed' && !inactive) {
+          ops += `<button class="btn btn-sm btn-warn" onclick="UI.dispatchReopen('${d.id}')">重新打开</button>`;
         }
         if (d.recordStatus === '已删除') {
           ops += `<button class="btn btn-sm" onclick="UI.dispatchRestore('${d.id}')">恢复</button>`;
           ops += `<button class="btn btn-sm btn-danger" onclick="UI.dispatchPurge('${d.id}')">永久删除</button>`;
-        } else if (d.status === '已撤销') {
+        } else if (dkey === 'revoked') {
           ops += `<button class="btn btn-sm" onclick="UI.dispatchUnrevoke('${d.id}')">恢复派单</button>`;
         } else {
           ops += `<span style="position:relative">
@@ -793,7 +797,7 @@ UI.renderDispatch = (filterArg) => {
           <td style="white-space:nowrap">${supLabel(d)}</td>
           <td>${NK.esc(disp.engineer || '—')}</td>
           <td style="white-space:nowrap">${visitLabel(d)}</td>
-          <td>${UI.statusBadge(d.status)}${d.urgentCount ? `<div style="font-size:10px;color:var(--warn)">已催${d.urgentCount}次</div>` : ''}${d.revokeReason ? `<div style="font-size:10px;color:var(--text-3)">撤销原因：${NK.esc(d.revokeReason)}</div>` : ''}</td>
+          <td>${UI.statusBadge(NK.dispatchStatusLabel(d))}${d.urgentCount ? `<div style="font-size:10px;color:var(--warn)">已催${d.urgentCount}次</div>` : ''}${d.revokeReason ? `<div style="font-size:10px;color:var(--text-3)">撤销原因：${NK.esc(d.revokeReason)}</div>` : ''}</td>
           <td style="white-space:nowrap">${ops}</td>
         </tr>`;
       }).join('') : UI.empty(showDeleted ? '回收站为空，暂无已删除派单' : '暂无派单，点击右上角「新建派单」开始', 8)}</tbody>
@@ -1242,9 +1246,7 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
             ? `花姐，${supName}的派单已经创建好了 ✓`
             : `花姐，${NK.v.siteName(pickedSite.name)}的派单已经生成 ✓`;
         root.querySelector('#dpSuccessSub').textContent =
-          pickedSite.defaultEngineer
-            ? `正在等待 ${NK.v.engName(pickedSite.defaultEngineer)} 确认`
-            : `派单已生成，请在详情中指定工程师`;
+          `派单已创建（待发送），记得发给${supName || '供应商'}后标记已发送`;
         root.querySelector('#dpMsgContent').textContent = d.msg;
         successView.classList.remove('hidden');
 
@@ -1285,24 +1287,29 @@ UI.dispatchDetail = (id) => {
   if (!d) return;
   const disp = NK.v.dispatch(d);
   const t = NK.getTask(d.taskId);
-  const flowIdx = NK.dispatchStep(d.status);
-  const flowHTML = `<div class="status-flow">${NK.DISPATCH_FLOW.map((s, i) => `
-    <div class="sf-step">
-      <div class="sf-dot ${i < flowIdx ? 'done' : i === flowIdx ? 'cur' : ''}">${i < flowIdx ? '✓' : i + 1}</div>
-      <div class="sf-name ${i === flowIdx ? 'cur' : i < flowIdx ? 'done' : ''}">${s}</div>
-      ${i < NK.DISPATCH_FLOW.length - 1 ? `<div class="sf-line ${i < flowIdx ? 'done' : ''}"></div>` : ''}
-    </div>`).join('')}</div>`;
+  const key = NK.dispatchStatusKey(d);
+  const label = NK.dispatchStatusLabel(d);
+  const sup = NK.dispatchSupplierLabel(d);
 
-  const timings = [
-    ['创建时间', d.createdAt ? NK.fmtDT(new Date(d.createdAt)) : '—'],
-    ['已发送时间', d.sentAt ? NK.fmtDT(new Date(d.sentAt)) : '—'],
-    ['开始处理', d.startAt ? NK.fmtDT(new Date(d.startAt)) : '—'],
-    ['闭环时间', d.doneAt ? NK.fmtDT(new Date(d.doneAt)) : '—'],
-    ['已发送后时长', d.sentAt ? NK.humanDur((d.doneAt ? new Date(d.doneAt) : new Date()) - new Date(d.sentAt)) : '未发送'],
-    ['总闭环时长', d.doneAt && d.createdAt ? NK.humanDur(new Date(d.doneAt) - new Date(d.createdAt)) : '—'],
-  ];
+  // 轻量三段状态提示：①待发送 — ②已发送 — ③已完成（当前高亮，不可点击）
+  const threeFlow = ['待发送', '已发送', '已完成'];
+  const flowIdx = threeFlow.indexOf(label); // completed→2, sent/pending_send/exception→对应
+  const flowCur = key === 'completed' ? 2 : key === 'sent' ? 1 : key === 'exception' ? 1 : key === 'pending_send' ? 0 : -1;
+  const flowHTML = `<div class="ds-flow">${threeFlow.map((s, i) => `
+    <div class="dsf-step ${i < flowCur ? 'done' : i === flowCur ? 'cur' : ''}">${i + 1} ${s}</div>
+    ${i < threeFlow.length - 1 ? `<div class="dsf-line ${i < flowCur ? 'done' : ''}"></div>` : ''}`).join('')}</div>`;
 
-  // 上门日期编辑控件（可补充/修改，保存后列表与搜索立即生效）
+  // 状态说明文案
+  const statusDesc = {
+    pending_send: '派单已经创建，尚未记录为发送给供应商。',
+    sent: `已发送给${sup === '未标注' ? '供应商' : sup}${d.visitDate ? `，计划${d.visitDate}上门` : ''}。如无异常，无需继续操作。`,
+    completed: '该派单已经完成。',
+    exception: '当前派单存在异常，请确认后续安排。',
+    revoked: '该派单已撤销，不再继续执行。',
+    draft: '草稿仅作创建前辅助态，不进入正式流程。',
+  }[key] || '';
+
+  // 上门日期编辑控件
   const visitNow = d.visitDate || '';
   const visitEdit = `
     <div class="dg-item" style="margin-bottom:8px">
@@ -1318,79 +1325,120 @@ UI.dispatchDetail = (id) => {
     </div>
     ${d.visitDateHistory && d.visitDateHistory.length ? `<div style="margin-top:4px;font-size:11px;color:var(--text-3)">修改历史：${d.visitDateHistory.map(h => `${h.from} → ${h.to}（${NK.fmtDT(new Date(h.at))}）`).join('；')}</div>` : ''}`;
 
+  // 当前情况与记录（状态说明/最近反馈/异常说明/完成说明/最近更新）
+  const lastFeedback = d.supplierFeedbackList && d.supplierFeedbackList.length
+    ? d.supplierFeedbackList[d.supplierFeedbackList.length - 1]
+    : null;
+  const histHTML = (d.statusHistory && d.statusHistory.length) ? `
+    <div id="ddHistToggle" style="cursor:pointer;color:var(--accent,#6a5ae0);font-size:12px;margin-top:8px">操作历史 ▸</div>
+    <div id="ddHistBody" style="display:none;margin-top:6px;max-height:180px;overflow:auto">
+      ${d.statusHistory.map(h => `<div style="font-size:11px;color:var(--text-3);padding:2px 0;border-bottom:1px dashed var(--line,#eee)">${NK.fmtDT(new Date(h.at))} · ${h.fromLabel || h.from} → ${h.toLabel || h.to}${h.note ? '（' + NK.esc(h.note) + '）' : ''}</div>`).join('')}
+    </div>` : '';
+
+  // 撤销原因展示
+  const revokeHTML = (d.revokeReason && key === 'revoked') ? `<div class="dg-item"><span class="dg-label">撤销原因</span><span class="dg-val">${NK.esc(d.revokeReason)}</span></div>` : '';
+
+  // 按状态动态按钮
+  const btnHTML = (() => {
+    const b = (id, label, cls) => `<button class="btn btn-sm ${cls || ''}" id="${id}">${label}</button>`;
+    switch (key) {
+      case 'draft':
+        return `<div style="display:flex;gap:6px;flex-wrap:wrap">${b('dsGen', '生成派单', 'btn-accent')}${b('dsEdit', '继续编辑')}${b('dsDelDraft', '删除草稿', 'btn-danger')}</div>`;
+      case 'pending_send':
+        return `<div style="display:flex;gap:6px;flex-wrap:wrap">${b('dsSend', '标记已发送', 'btn-accent')}${b('dsCopy', '复制')}${b('dsEdit', '编辑')}${b('dsModSup', '修改供应商')}${b('dsModVisit', '修改上门日期')}${b('dsRevoke', '撤销')}${b('dsDelete', '删除', 'btn-danger')}</div>`;
+      case 'sent':
+        return `<div style="display:flex;gap:6px;flex-wrap:wrap">${b('dsDone', '标记完成', 'btn-success')}${b('dsCopy', '复制')}${b('dsModVisit', '修改上门日期')}${b('dsFeedback', '记录供应商反馈')}${b('dsException', '记录异常', 'btn-warn')}${b('dsModSup', '更换供应商')}${b('dsRevoke', '撤销')}</div>`;
+      case 'exception':
+        return `<div style="display:flex;gap:6px;flex-wrap:wrap">${b('dsResolve', '处理异常', 'btn-accent')}${b('dsModVisit', '修改上门日期')}${b('dsModSup', '更换供应商')}${b('dsExcNote', '补充异常说明')}${b('dsDone', '标记完成', 'btn-success')}${b('dsRevoke', '撤销')}</div>`;
+      case 'completed':
+        return `<div style="display:flex;gap:6px;flex-wrap:wrap">${b('dsView', '查看')}${b('dsHist', '历史')}${b('dsCopy', '复制')}${b('dsReopen', '重新打开', 'btn-warn')}</div>`;
+      case 'revoked':
+        return `<div style="display:flex;gap:6px;flex-wrap:wrap">${b('dsView', '查看详情')}${b('dsRevokeReason', '撤销原因')}${b('dsRestore', '恢复派单', 'btn-accent')}${b('dsHist', '历史')}</div>`;
+      default:
+        return '';
+    }
+  })();
+
   const body = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
       <span class="num" style="font-weight:700;font-size:14px">${d.no}</span>
       <h3 style="flex:1;font-size:15px">${NK.esc(disp.title)}</h3>
-      ${UI.priBadge(d.priority)} ${UI.statusBadge(d.status)}
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--text-2);margin-bottom:8px">
+      <span>供应商：<b>${sup === '未标注' ? '<span style="color:var(--text-3)">未标注</span>' : NK.esc(sup)}</b></span>
+      <span>职场：<b>${NK.esc(disp.siteName || d.city || '—')}</b></span>
+      <span>上门日期：<b>${d.visitDate ? NK.esc(d.visitDate) : '<span style="color:var(--text-3)">未填写</span>'}</b></span>
+      <span>状态：${UI.statusBadge(label)}</span>
     </div>
     ${flowHTML}
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
-      <div class="card"><div class="card-head"><div class="card-title">职场与联系人</div></div><div class="card-body">
-        <div class="detail-grid">
-          <div class="dg-item"><span class="dg-label">职场</span><span class="dg-val">${NK.esc(disp.siteName || d.city || '—')}</span></div>
-          <div class="dg-item"><span class="dg-label">供应商</span><span class="dg-val" id="ddSupVal">${NK.dispatchSupplierLabel(d) === '未标注' ? '<span style="color:var(--text-3)">未标注</span>' : NK.dispatchSupplierLabel(d)}</span>
-            <button class="btn btn-sm" id="ddSupEdit" style="margin-left:4px">${NK.dispatchSupplierLabel(d) === '未标注' ? '补充供应商' : '修改供应商'}</button></div>
-          <div class="dg-item"><span class="dg-label">地址</span><span class="dg-val">${NK.esc(disp.address || '—')}</span></div>
-          <div class="dg-item"><span class="dg-label">联系人</span><span class="dg-val">${NK.esc(disp.contactName || '—')} ${NK.esc(disp.contactPhone || '')}</span></div>
-          <div class="dg-item"><span class="dg-label">支持方式</span><span class="dg-val">${disp.supportType || '—'}${disp.needDispatch ? ' · 需派单' : ''}</span></div>
-          <div class="dg-item"><span class="dg-label">工程师</span><span class="dg-val">${NK.esc(disp.engineer || '—')}</span></div>
-          <div class="dg-item"><span class="dg-label">工单号</span><span class="dg-val">${NK.esc(d.workNo || '—')}</span></div>
+    <div style="margin:8px 0 12px;padding:8px 12px;background:var(--bg-soft,#f6f5ff);border-radius:8px;font-size:12px;color:var(--text-2)">${NK.esc(statusDesc)}</div>
+    <div class="card"><div class="card-head"><div class="card-title">基本信息</div></div><div class="card-body">
+      <div class="detail-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:6px 14px">
+        <div class="dg-item"><span class="dg-label">派单编号</span><span class="dg-val">${d.no}</span></div>
+        <div class="dg-item"><span class="dg-label">事项名称</span><span class="dg-val">${NK.esc(disp.title)}</span></div>
+        <div class="dg-item"><span class="dg-label">供应商</span><span class="dg-val" id="ddSupVal">${sup === '未标注' ? '<span style="color:var(--text-3)">未标注</span>' : NK.esc(sup)}</span>
+          ${key === 'pending_send' || key === 'sent' || key === 'exception' ? `<button class="btn btn-sm" id="ddSupEdit" style="margin-left:4px">${sup === '未标注' ? '补充' : '修改'}</button>` : ''}</div>
+        <div class="dg-item"><span class="dg-label">职场</span><span class="dg-val">${NK.esc(disp.siteName || d.city || '—')}</span></div>
+        <div class="dg-item"><span class="dg-label">当前状态</span><span class="dg-val">${UI.statusBadge(label)}</span></div>
+      </div>
+      <div id="ddSupEditBox" style="display:none;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line,#e5e5e5)">
+        <div style="display:flex;gap:8px;align-items:center">
+          ${NK.SUPPLIERS.map(s => `<button type="button" class="dp-sup-btn" data-sup="${s.id}" data-name="${s.name}">${s.name}</button>`).join('')}
+          <button class="btn btn-sm btn-accent" id="ddSupSave">保存</button>
+          <button class="btn btn-sm" id="ddSupCancel">取消</button>
         </div>
-        <div id="ddSupEditBox" style="display:none;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line,#e5e5e5)">
-          <div style="display:flex;gap:8px;align-items:center">
-            ${NK.SUPPLIERS.map(s => `<button type="button" class="dp-sup-btn" data-sup="${s.id}" data-name="${s.name}">${s.name}</button>`).join('')}
-            <button class="btn btn-sm btn-accent" id="ddSupSave">保存</button>
-            <button class="btn btn-sm" id="ddSupCancel">取消</button>
-          </div>
-          ${d.supplierHistory && d.supplierHistory.length ? `<div style="margin-top:6px;font-size:11px;color:var(--text-3)">修改历史：${d.supplierHistory.map(h => `${h.fromName} → ${h.toName}（${NK.fmtDT(new Date(h.at))}）`).join('；')}</div>` : ''}
-        </div>
-      </div></div>
-      <div class="card"><div class="card-head"><div class="card-title">上门日期</div></div><div class="card-body">
-        ${visitEdit}
-      </div></div>
-      <div class="card"><div class="card-head"><div class="card-title">时间记录</div></div><div class="card-body">
-        ${timings.map(([k, v]) => `<div class="dg-item" style="margin-bottom:6px"><span class="dg-label">${k}</span><span class="dg-val">${v}</span></div>`).join('')}
-      </div></div>
-    </div>
-    <div class="card"><div class="card-head"><div class="card-title">事项描述</div></div><div class="card-body">${NK.esc(d.desc || '—')}
-      <div style="margin-top:8px;color:var(--text-3);font-size:11px">要求确认：${d.requireConfirmBy || '—'} ｜ 到场：${d.planArrive || '—'} ${d.planArriveTime || ''} ｜ 完成：${d.planDone || '—'} ${d.planDoneTime || ''}</div>
+        ${d.supplierHistory && d.supplierHistory.length ? `<div style="margin-top:6px;font-size:11px;color:var(--text-3)">修改历史：${d.supplierHistory.map(h => `${h.fromName} → ${h.toName}（${NK.fmtDT(new Date(h.at))}）`).join('；')}</div>` : ''}
+      </div>
+      ${(key === 'pending_send' || key === 'sent' || key === 'exception') ? visitEdit : `<div class="dg-item" style="margin-bottom:8px"><span class="dg-label">上门日期</span><span class="dg-val">${visitNow ? NK.esc(visitNow) : '<span style="color:var(--text-3)">未填写</span>'}</span></div>`}
     </div></div>
-    <div class="card"><div class="card-head"><div class="card-title">进展与记录</div><div style="display:flex;gap:6px;flex-wrap:wrap">
-      ${d.status !== '已闭环' ? `<button class="btn btn-sm" id="ddFeedback">记录进展</button>` : ''}
-      ${d.status !== '已闭环' ? `<button class="btn btn-sm btn-warn" id="ddUrgent">催一下</button>` : ''}
-      ${d.status === '已处理' ? `<button class="btn btn-sm btn-accent" id="ddAccept">去验收</button>` : ''}
-      ${d.status === '待花姐验收' ? `<button class="btn btn-sm btn-accent" id="ddAccept">验收通过</button>` : ''}
-      ${d.status !== '已闭环' ? `<button class="btn btn-sm btn-success" id="ddClose">完成闭环</button>` : ''}
+    <div class="card"><div class="card-head"><div class="card-title">职场与联系信息</div></div><div class="card-body">
+      <div class="detail-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:6px 14px">
+        <div class="dg-item"><span class="dg-label">联系人</span><span class="dg-val">${NK.esc(disp.contactName || '—')} ${NK.esc(disp.contactPhone || '')}</span></div>
+        <div class="dg-item"><span class="dg-label">电话</span><span class="dg-val">${NK.esc(disp.contactPhone || '—')}</span></div>
+        <div class="dg-item"><span class="dg-label">地址</span><span class="dg-val">${NK.esc(disp.address || '—')}</span></div>
+        <div class="dg-item"><span class="dg-label">默认工程师</span><span class="dg-val">${NK.esc(disp.engineer || '—')}</span></div>
+        <div class="dg-item"><span class="dg-label">派单原因</span><span class="dg-val">${NK.esc(d.desc || d.title || '—')}</span></div>
+        <div class="dg-item"><span class="dg-label">支持方式</span><span class="dg-val">${disp.supportType || '—'}${disp.needDispatch ? ' · 需派单' : ''}</span></div>
+      </div>
     </div></div>
-    <div class="card-body">
-      <div class="dg-item" style="margin-bottom:6px"><span class="dg-label">当前卡点</span><span class="dg-val">${NK.esc(d.nextAction || '—')}</span></div>
-      <div class="dg-item" style="margin-bottom:6px"><span class="dg-label">最新进展</span><span class="dg-val">${NK.esc(d.latestFeedback || '—')}</span></div>
-      <div class="dg-item" style="margin-bottom:6px"><span class="dg-label">处理结果</span><span class="dg-val">${NK.esc(d.result || '—')}</span></div>
-      <div class="dg-item"><span class="dg-label">验收结论</span><span class="dg-val">${NK.esc(d.acceptResult || '—')}</span></div>
-      ${d.reminders && d.reminders.length ? `<div style="margin-top:8px;font-size:11px;color:var(--warn)">已催办 ${d.reminders.length} 次：${d.reminders.map(r => NK.fmtDT(new Date(r.t))).join('、')}</div>` : ''}
+    <div class="card"><div class="card-head"><div class="card-title">当前情况与记录</div></div><div class="card-body">
+      <div class="dg-item" style="margin-bottom:6px"><span class="dg-label">状态说明</span><span class="dg-val">${NK.esc(statusDesc)}</span></div>
+      <div class="dg-item" style="margin-bottom:6px"><span class="dg-label">最近供应商反馈</span><span class="dg-val">${lastFeedback ? `${NK.esc(lastFeedback.content)}${lastFeedback.person ? '（' + NK.esc(lastFeedback.person) + '）' : ''}` : '—'}</span></div>
+      ${key === 'exception' ? `<div class="dg-item" style="margin-bottom:6px"><span class="dg-label">异常说明</span><span class="dg-val">${NK.esc(d.exceptionNote || '—')}</span></div>` : ''}
+      ${key === 'completed' ? `<div class="dg-item" style="margin-bottom:6px"><span class="dg-label">完成说明</span><span class="dg-val">${NK.esc(d.completionNote || '—')}</span></div>` : ''}
+      <div class="dg-item"><span class="dg-label">最近更新</span><span class="dg-val">${d.updatedAt ? NK.fmtDT(new Date(d.updatedAt)) : '—'}</span></div>
+      ${histHTML}
     </div></div>
-    <div class="card"><div class="card-head"><div class="card-title">派单消息</div><div><button class="btn btn-sm" id="ddCopyMsg">复制</button></div></div>
-      <div class="card-body"><div class="msg-preview">${NK.esc(d.msg || '')}</div></div></div>
-    <div class="card"><div class="card-head"><div class="card-title">关联任务</div></div><div class="card-body">
-      ${t ? `<div class="dg-item"><span class="dg-label">任务号</span><span class="dg-val">${t.no} ${NK.esc(t.name)} ${UI.statusBadge(t.status)}</span></div>
-      <div style="margin-top:8px"><button class="btn btn-sm" onclick="UI.taskDetail('${t.id}')">查看任务</button></div>` : '—'}
-    </div></div>`;
+    <div class="card"><div class="card-head"><div class="card-title">操作</div></div><div class="card-body">
+      ${btnHTML}
+    </div></div>
+    ${revokeHTML}`;
   const foot = `<button class="btn" data-close>关闭</button>`;
   UI.modal(`派单详情`, body, foot, {
     size: 'modal-lg',
     onMount(root) {
-      // [close] 已由统一弹窗机制绑定
-      const b1 = root.querySelector('#ddFeedback');
-      if (b1) b1.onclick = () => UI.dispatchFeedback(d.id);
-      const b2 = root.querySelector('#ddUrgent');
-      if (b2) b2.onclick = () => UI.dispatchUrgent(d.id);
-      const b3 = root.querySelector('#ddAccept');
-      if (b3) b3.onclick = () => UI.dispatchAccept(d.id);
-      const b4 = root.querySelector('#ddClose');
-      if (b4) b4.onclick = () => UI.dispatchClose(d.id);
-      const b5 = root.querySelector('#ddCopyMsg');
-      if (b5) b5.onclick = () => UI.copy(d.msg);
+      const ck = (btnId, fn) => { const b = root.querySelector(btnId); if (b) b.onclick = fn; };
+      ck('#dsSend', () => UI.dispatchMarkSent(d.id));
+      ck('#dsDone', () => UI.dispatchMarkCompleted(d.id));
+      ck('#dsCopy', () => UI.copy(d.msg || ''));
+      ck('#dsEdit', () => UI.dispatchCreate(d.siteId || '', { editId: d.id }));
+      ck('#dsModSup', () => { const b = root.querySelector('#ddSupEdit'); if (b) b.click(); });
+      ck('#dsModVisit', () => { const b = root.querySelector('#ddVisitEdit'); if (b) b.click(); });
+      ck('#dsFeedback', () => UI.dispatchFeedback(d.id));
+      ck('#dsException', () => UI.dispatchRecordException(d.id));
+      ck('#dsResolve', () => UI.dispatchResolveException(d.id));
+      ck('#dsExcNote', () => UI.dispatchRecordException(d.id));
+      ck('#dsRevoke', () => UI.dispatchRevoke(d.id));
+      ck('#dsDelete', () => UI.dispatchDelete(d.id));
+      ck('#dsDelDraft', () => UI.dispatchDelete(d.id));
+      ck('#dsReopen', () => UI.dispatchReopen(d.id));
+      ck('#dsRestore', () => UI.dispatchUnrevoke(d.id));
+      ck('#dsGen', () => { if (d.siteId) UI.dispatchCreate(d.siteId); });
+      ck('#dsHist', () => { const h = root.querySelector('#ddHistBody'); if (h) h.style.display = h.style.display === 'block' ? 'none' : 'block'; });
+      ck('#dsView', () => {});
+      ck('#dsRevokeReason', () => {});
+      ck('#ddHistToggle', () => { const h = root.querySelector('#ddHistBody'); if (h) h.style.display = h.style.display === 'block' ? 'none' : 'block'; });
+      ck('#dsModVisit2', () => {});
 
       // 上门日期补充/修改
       const visitEditBtn = root.querySelector('#ddVisitEdit');
@@ -1429,23 +1477,19 @@ UI.dispatchDetail = (id) => {
         root.querySelector('#ddVisitCancel').onclick = () => { if (visitBox) visitBox.style.display = 'none'; };
       }
 
-      // 供应商补充/修改（带确认，保留修改历史，不改变编号/工程师/状态）
+      // 供应商补充/修改
       const supEditBtn = root.querySelector('#ddSupEdit');
       const supBox = root.querySelector('#ddSupEditBox');
       const supVal = root.querySelector('#ddSupVal');
       let supPick = '';
       const supBtns2 = root.querySelectorAll('#ddSupEditBox .dp-sup-btn');
-      const applySup2 = () => {
-        supBtns2.forEach(b => b.classList.toggle('dp-sup-active', !!supPick && b.dataset.sup === supPick));
-      };
-      supBtns2.forEach(b => {
-        b.onclick = () => { supPick = b.dataset.sup; applySup2(); };
-      });
+      const applySup2 = () => supBtns2.forEach(b => b.classList.toggle('dp-sup-active', !!supPick && b.dataset.sup === supPick));
+      supBtns2.forEach(b => { b.onclick = () => { supPick = b.dataset.sup; applySup2(); }; });
       const refreshSupVal = () => {
         const cur = NK.getDispatch(d.id);
-        const curSup = cur ? NK.dispatchSupplierLabel(cur) : NK.dispatchSupplierLabel(d);
+        const curSup = cur ? NK.dispatchSupplierLabel(cur) : sup;
         if (supVal) supVal.innerHTML = curSup === '未标注' ? '<span style="color:var(--text-3)">未标注</span>' : NK.esc(curSup);
-        if (supEditBtn) supEditBtn.textContent = curSup === '未标注' ? '补充供应商' : '修改供应商';
+        if (supEditBtn) supEditBtn.textContent = curSup === '未标注' ? '补充' : '修改';
       };
       if (supEditBtn) supEditBtn.onclick = () => { if (supBox) { supBox.style.display = 'block'; supPick = ''; applySup2(); } };
       if (root.querySelector('#ddSupCancel')) {
@@ -1457,7 +1501,6 @@ UI.dispatchDetail = (id) => {
           const curSup = NK.dispatchSupplierLabel(NK.getDispatch(d.id) || d);
           const ns = NK.normSupplier(supPick);
           if (!ns) return;
-          // 修改确认：确定将供应商从 X 修改为 Y 吗？
           const doSave = () => {
             NK.setSupplier(d.id, ns.id);
             refreshSupVal();
@@ -1476,91 +1519,158 @@ UI.dispatchDetail = (id) => {
   });
 };
 
-/** 记录进展（极简：状态+可选备注） */
-UI.dispatchFeedback = (id) => {
+/** 标记已发送（轻量确认） */
+UI.dispatchMarkSent = (id) => {
   const d = NK.getDispatch(id);
-  // 花姐快速状态选项
-  const quickActions = [
-    { label: '标记已发送', value: '已发送', note: '复制派单消息并发送，记得在微信/Tel里通知工程师' },
-    { label: '开始处理', value: '处理中', note: '事项已在处理中' },
-    { label: '等待外部条件', value: '等待外部条件', note: '等配件/等现场开放/等客户' },
-    { label: '已处理完成', value: '已处理', note: '工程师反馈处理完毕，等待验收' },
-  ];
+  if (!d) return;
+  const sup = NK.dispatchSupplierLabel(d);
+  UI.confirm(
+    `确认已将该派单发送给${sup === '未标注' ? '供应商' : sup}吗？\n\n供应商：${sup}\n职场：${NK.v.siteName(d.siteName) || d.city || '—'}\n上门日期：${d.visitDate || '未填写'}\n事项：${d.title || '—'}`,
+    () => {
+      const r = NK.markDispatchSent(id);
+      if (r && r.ok) {
+        UI.toast(r.msg || '已标记已发送', 'ok');
+        UI.modalClose();
+        UI.renderHome && UI.renderHome();
+        UI.refreshBadges && UI.refreshBadges();
+        UI.renderDispatch && UI.renderDispatch();
+      } else {
+        UI.toast(r && r.msg ? r.msg : '无法标记已发送，请先完善派单信息', 'warn');
+      }
+    },
+    '确认已发送'
+  );
+};
+
+/** 标记完成（简洁确认） */
+UI.dispatchMarkCompleted = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
   const body = `
-    <p style="margin-bottom:12px;font-size:12px;color:var(--text-2)">快速更新状态（可选补充一句）：</p>
-    <div class="qs-grid">${quickActions.map(a => `
-      <button class="qs-btn" data-qs="${a.value}" title="${a.note}">${a.label}</button>`).join('')}
-    </div>
-    <div style="margin-top:12px">
-      <textarea id="fbText" rows="3" placeholder="补充一句进展（可不填）" style="width:100%;resize:vertical;box-sizing:border-box"></textarea>
-    </div>
-    <div style="margin-top:8px">
-      <label style="font-size:12px;color:var(--text-2)">下次跟进提醒（可选）：</label>
-      <div class="qs-grid" style="margin-top:4px">
-        <button class="qs-btn" data-next="30m">30分钟后</button>
-        <button class="qs-btn" data-next="1h">1小时后</button>
-        <button class="qs-btn" data-next="todaypm">今天下午</button>
-        <button class="qs-btn" data-next="tomorrowam">明天上午</button>
-        <button class="qs-btn" data-next="custom" style="flex:2">自定义</button>
-      </div>
-      <input type="datetime-local" id="fbNextTime" style="display:none;margin-top:6px;width:100%;box-sizing:border-box;font-size:13px">
-    </div>`;
-  UI.modal('记录进展', body, `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="fbOk">保存</button>`, {
+    <p>确认这条派单 <b>${d.no}</b>「${NK.esc(d.title)}」已经正常完成吗？</p>
+    <div class="form-item" style="margin-top:10px"><label>完成说明（可选）</label><textarea id="mcNote" placeholder="如：供应商已上门处理完毕"></textarea></div>`;
+  UI.modal('标记完成', body, `<button class="btn" data-close>取消</button><button class="btn btn-success" id="mcOk">确认完成</button>`, {
+    onMount(root) {
+      root.querySelector('#mcOk').onclick = () => {
+        const note = root.querySelector('#mcNote').value.trim();
+        const r = NK.markDispatchCompleted(id, note);
+        UI.toast(r && r.ok ? '花姐，这条派单已经完成，顺利收尾。✅' : (r && r.msg || '操作失败'), r && r.ok ? 'ok' : 'warn');
+        UI.modalClose();
+        UI.renderHome && UI.renderHome();
+        UI.refreshBadges && UI.refreshBadges();
+        UI.renderDispatch && UI.renderDispatch();
+      };
+    },
+  });
+};
+
+/** 记录异常（保存后改异常待处理） */
+UI.dispatchRecordException = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  const types = ['供应商暂时无法安排', '上门日期需要调整', '用户取消上门', '现场问题未解决', '需要更换供应商', '联系人暂时无法配合', '其他'];
+  const body = `
+    <p style="margin-bottom:8px;font-size:12px;color:var(--text-2)">该派单存在异常，请确认新的处理安排。</p>
+    <div class="form-item"><label>异常类型</label>
+      <div class="qs-grid">${types.map((t2, i) => `<button type="button" class="qs-btn" data-et="${t2}" ${i === 0 ? 'style="border-color:var(--accent,#6a5ae0);background:rgba(106,90,224,.08)"' : ''}>${t2}</button>`).join('')}</div></div>
+    <div class="form-item" style="margin-top:10px"><label>异常说明</label><textarea id="exNote" placeholder="如：源晨说本周排不出人，需要改到下周三"></textarea></div>
+    <div class="form-item" style="margin-top:10px"><label>后续安排（可选）</label><input id="exNext" placeholder="如：改期下周三上门"></div>`;
+  UI.modal('记录异常', body, `<button class="btn" data-close>取消</button><button class="btn btn-warn" id="exOk">保存并标记异常</button>`, {
     editable: true,
     onMount(root) {
-      // [close] 已由统一弹窗机制绑定
-      // 快速状态按钮
-      root.querySelectorAll('.qs-btn[data-qs]').forEach(btn => {
-        btn.onclick = () => {
-          root.querySelectorAll('.qs-btn[data-qs]').forEach(b => b.classList.remove('qs-active'));
-          btn.classList.add('qs-active');
-          btn.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        };
+      let et = types[0];
+      root.querySelectorAll('.qs-btn[data-et]').forEach(b => {
+        b.onclick = () => { root.querySelectorAll('.qs-btn[data-et]').forEach(x => x.style.cssText = ''); et = b.dataset.et; b.style.cssText = 'border-color:var(--accent,#6a5ae0);background:rgba(106,90,224,.08)'; };
       });
-      // 下次跟进按钮
-      root.querySelectorAll('.qs-btn[data-next]').forEach(btn => {
-        btn.onclick = () => {
-          const t = btn.dataset.next;
-          root.querySelectorAll('.qs-btn[data-next]').forEach(b => b.classList.remove('qs-active'));
-          btn.classList.add('qs-active');
-          if (t === 'custom') {
-            root.querySelector('#fbNextTime').style.display = 'block';
-          } else if (t === '30m') {
-            const dt = new Date(Date.now() + 30 * 60000);
-            root.querySelector('#fbNextTime').value = dt.toISOString().slice(0, 16);
-            root.querySelector('#fbNextTime').style.display = 'block';
-          } else if (t === '1h') {
-            const dt = new Date(Date.now() + 3600000);
-            root.querySelector('#fbNextTime').value = dt.toISOString().slice(0, 16);
-            root.querySelector('#fbNextTime').style.display = 'block';
-          } else if (t === 'todaypm') {
-            const dt = new Date(); dt.setHours(17, 0, 0, 0);
-            root.querySelector('#fbNextTime').value = dt.toISOString().slice(0, 16);
-            root.querySelector('#fbNextTime').style.display = 'block';
-          } else if (t === 'tomorrowam') {
-            const dt = new Date(); dt.setDate(dt.getDate() + 1); dt.setHours(9, 0, 0, 0);
-            root.querySelector('#fbNextTime').value = dt.toISOString().slice(0, 16);
-            root.querySelector('#fbNextTime').style.display = 'block';
-          }
-        };
-      });
-      root.querySelector('#fbOk').onclick = () => {
-        const activeBtn = root.querySelector('.qs-btn[data-qs].qs-active');
-        const status = activeBtn ? activeBtn.dataset.qs : null;
-        if (!status) { UI.toast('花姐，请先选择一个状态', 'warn'); return; }
-        const text = root.querySelector('#fbText').value.trim();
-        const nextTime = root.querySelector('#fbNextTime').value;
-        // 更新进展
-        NK.updateDispatchFeedback(d, { feedback: text || '花姐更新了进展' });
-        // 推进状态
-        if (status !== d.status) NK.setDispatchStatus(d, status);
-        // 设置下次跟进时间
-        if (nextTime) d.nextFollowup = new Date(nextTime).toISOString();
-        NK.save();
-        UI.toast('花姐，进展已记录 ✓');
+      root.querySelector('#exOk').onclick = () => {
+        const note = root.querySelector('#exNote').value.trim();
+        const next = root.querySelector('#exNext').value.trim();
+        const r = NK.recordDispatchException(id, { type: et, note, next });
+        UI.toast(r && r.ok ? '该派单存在异常，已标记为待处理，请确认新的处理安排。' : (r && r.msg || '操作失败'), r && r.ok ? 'warn' : 'warn');
         UI.modalClose();
-        UI.renderHome();
-        UI.refreshBadges();
+        UI.renderHome && UI.renderHome();
+        UI.refreshBadges && UI.refreshBadges();
+        UI.renderDispatch && UI.renderDispatch();
+      };
+    },
+  });
+};
+
+/** 处理异常：resolve恢复已发送 / done完成 / revoke撤销 */
+UI.dispatchResolveException = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  const body = `
+    <p>派单 <b>${d.no}</b>「${NK.esc(d.title)}」当前为异常待处理。</p>
+    <p style="margin-top:6px;font-size:12px;color:var(--text-2)">异常类型：${NK.esc(d.exceptionType || '—')}<br>异常说明：${NK.esc(d.exceptionNote || '—')}</p>
+    <div class="form-item" style="margin-top:10px"><label>选择处理结果</label>
+      <select id="rsType"><option value="resolve">已恢复正常，继续已发送</option><option value="done">问题已解决，标记完成</option><option value="revoke">取消执行，标记撤销</option></select></div>
+    <div class="form-item" style="margin-top:10px"><label>处理说明（可选）</label><textarea id="rsNote" placeholder="如：供应商重新排期，已恢复"></textarea></div>`;
+  UI.modal('处理异常', body, `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="rsOk">确认</button>`, {
+    onMount(root) {
+      root.querySelector('#rsOk').onclick = () => {
+        const result = root.querySelector('#rsType').value;
+        const note = root.querySelector('#rsNote').value.trim();
+        const r = NK.resolveDispatchException(id, result, note);
+        if (r && r.ok) {
+          UI.toast(r.msg, 'ok');
+          UI.modalClose();
+          UI.renderHome && UI.renderHome();
+          UI.refreshBadges && UI.refreshBadges();
+          UI.renderDispatch && UI.renderDispatch();
+        } else {
+          UI.toast(r && r.msg || '操作失败', 'warn');
+        }
+      };
+    },
+  });
+};
+
+/** 重新打开已完成派单（二次确认） */
+UI.dispatchReopen = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  UI.confirm('确定重新打开这条已完成派单吗？', () => {
+    const r = NK.reopenDispatch(id);
+    UI.toast(r && r.ok ? r.msg : (r && r.msg || '操作失败'), r && r.ok ? 'ok' : 'warn');
+    UI.modalClose();
+    UI.renderHome && UI.renderHome();
+    UI.refreshBadges && UI.refreshBadges();
+    UI.renderDispatch && UI.renderDispatch();
+  }, '重新打开');
+};
+
+/** 记录进展（极简：状态+可选备注） */
+/** 记录供应商反馈（可选，字段全部可选；保存后仍保持已发送） */
+UI.dispatchFeedback = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  const body = `
+    <p style="margin-bottom:8px;font-size:12px;color:var(--text-2)">记录供应商反馈（可选填写，用于后续参考）：</p>
+    <div class="form-item"><label>反馈内容</label><textarea id="fbContent" rows="3" placeholder="如：源晨已确认，周三上午9点上门"></textarea></div>
+    <div class="form-item" style="margin-top:10px"><label>上门人员姓名（可选）</label><input id="fbPerson" placeholder="如：张师傅"></div>
+    <div class="form-item" style="margin-top:10px"><label>联系电话（可选）</label><input id="fbPhone" placeholder="如：13800000000"></div>
+    <div class="form-item" style="margin-top:10px"><label>预计上门日期变更（可选）</label><input id="fbVisit" type="date" class="dp-input dp-date-input" value="${d.visitDate || ''}"></div>
+    <div class="form-item" style="margin-top:10px"><label>反馈时间</label><span id="fbTime" style="font-size:12px;color:var(--text-3)">${NK.fmtDT(new Date())}</span></div>`;
+  UI.modal('记录供应商反馈', body, `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="fbOk">保存</button>`, {
+    editable: true,
+    onMount(root) {
+      root.querySelector('#fbOk').onclick = () => {
+        const content = root.querySelector('#fbContent').value.trim();
+        const person = root.querySelector('#fbPerson').value.trim();
+        const phone = root.querySelector('#fbPhone').value.trim();
+        const visit = root.querySelector('#fbVisit').value;
+        const data = {};
+        if (content) data.content = content;
+        if (person) data.person = person;
+        if (phone) data.phone = phone;
+        if (visit && visit !== d.visitDate) data.changedVisitDate = visit;
+        const r = NK.recordSupplierFeedback(id, data);
+        UI.toast(r && r.ok ? '花姐，已记录供应商反馈。' : (r && r.msg || '操作失败'), r && r.ok ? 'ok' : 'warn');
+        UI.modalClose();
+        UI.renderHome && UI.renderHome();
+        UI.refreshBadges && UI.refreshBadges();
+        UI.renderDispatch && UI.renderDispatch();
       };
     },
   });
@@ -1581,70 +1691,6 @@ UI.dispatchUrgent = (id) => {
         await UI.copy(msg);
         NK.save();
         UI.toast('花姐，催办内容已复制，发出去后我会记住这次催办时间');
-        UI.modalClose();
-        UI.renderHome();
-        UI.refreshBadges();
-      };
-    },
-  });
-};
-
-/** 验收派单 */
-UI.dispatchAccept = (id) => {
-  const d = NK.getDispatch(id);
-  UI.modal('验收派单', `
-    <p>派单 <b>${d.no}</b>「${NK.esc(d.title)}」<br>当前结果：${NK.esc(d.result || '无记录')}</p>
-    <div style="margin-top:10px">
-      <div class="form-item"><label>验收结论</label>
-        <select id="acResult"><option>验收通过，闭环归档</option><option>验收不通过，退回继续处理</option></select></div>
-      <div class="form-item" style="margin-top:10px"><label>验收说明</label><textarea id="acNote" placeholder="可填写验收意见"></textarea></div>
-    </div>`,
-    `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="acOk">确认验收</button>`, {
-    onMount(root) {
-      // [close] 已由统一弹窗机制绑定
-      root.querySelector('#acOk').onclick = () => {
-        const pass = root.querySelector('#acResult').value.includes('通过');
-        const note = root.querySelector('#acNote').value;
-        NK.updateDispatchFeedback(d, {
-          acceptResult: (pass ? '验收通过' : '验收不通过') + (note ? '：' + note : ''),
-          nextAction: pass ? '已闭环' : '花姐验收不通过，退回继续处理',
-        });
-        if (pass) {
-          NK.setDispatchStatus(d, '已闭环');
-          d.acceptResult = '验收通过' + (note ? '：' + note : '');
-        } else {
-          NK.setDispatchStatus(d, '处理中');
-        }
-        NK.save();
-        UI.toast(pass ? '花姐，这条派单已闭环 ✓' : '花姐，已退回继续处理，记得跟进');
-        UI.modalClose();
-        UI.renderHome();
-        UI.refreshBadges();
-      };
-    },
-  });
-};
-
-/** 完成闭环（花姐直接闭环） */
-UI.dispatchClose = (id) => {
-  const d = NK.getDispatch(id);
-  UI.modal('完成闭环', `
-    <p>派单 <b>${d.no}</b>「${NK.esc(d.title)}」<br>当前状态：${d.status}</p>
-    <div style="margin-top:12px">
-      <div class="form-item"><label>闭环说明（可选）</label><textarea id="clNote" placeholder="如：电话确认处理完毕，直接闭环"></textarea></div>
-    </div>`,
-    `<button class="btn" data-close>取消</button><button class="btn btn-success" id="clOk">确认闭环</button>`, {
-    onMount(root) {
-      // [close] 已由统一弹窗机制绑定
-      root.querySelector('#clOk').onclick = () => {
-        const note = root.querySelector('#clNote').value.trim();
-        NK.updateDispatchFeedback(d, {
-          acceptResult: note ? '直接闭环：' + note : '花姐确认闭环',
-          nextAction: '已闭环',
-        });
-        NK.setDispatchStatus(d, '已闭环');
-        NK.save();
-        UI.toast('花姐，这条派单已闭环 ✓');
         UI.modalClose();
         UI.renderHome();
         UI.refreshBadges();
@@ -1719,8 +1765,8 @@ UI.dispatchDelete = (id) => {
   const d = NK.getDispatch(id);
   if (!d) return;
   // 纯状态判断是否已产生处理记录（只引导，不真正删除，避免取消时误删）
-  const processed = ['已发送', '跟进中', '处理中', '等待外部条件', '已处理', '待花姐验收', '已闭环'];
-  if (processed.includes(d.status)) {
+  const processed = ['sent', 'exception', 'completed'];
+  if (processed.includes(NK.dispatchStatusKey(d))) {
     // 已产生处理记录 → 引导撤销
     UI.modal('删除记录', `
       <p style="font-weight:600">这条派单已经产生处理记录</p>
@@ -1871,7 +1917,7 @@ UI.bindSearch = () => {
       r.dispatches.slice(0, 5).forEach(d => {
         html += `<div class="sd-item" onclick="UI.searchGo('disp','${d.id}')">
           <div class="sd-main"><div class="sd-name">${NK.esc(d.no)} ${NK.esc(d.title)}</div>
-          <div class="sd-sub">${NK.esc(NK.v.siteName(d.siteName))} · ${UI.statusBadge(d.status)}</div></div></div>`;
+          <div class="sd-sub">${NK.esc(NK.v.siteName(d.siteName))} · ${UI.statusBadge(NK.dispatchStatusLabel(d))}</div></div></div>`;
       });
       html += `</div>`;
     }
@@ -3202,7 +3248,7 @@ UI.resRenderTab = () => {
     const engCards = NK.db.engineers.map(e => {
       const v = NK.v.eng(e);
       const sites = NK.sitesByEngineer(e.name);
-      const active = NK.db.dispatches.filter(d => d.engineer === e.name && d.status !== '已闭环' && d.status !== '已取消').length;
+      const active = NK.db.dispatches.filter(d => d.engineer === e.name && NK.dispatchActive(d)).length;
       const kpi = NK.computeKpi(e.name, NK.curMonth());
       const onsite = e.onsiteRegions.filter(r => r).join(' / ') || '—';
       const remote = e.remoteRegions.filter(r => r).join(' / ') || '—';
@@ -3234,7 +3280,7 @@ UI.resRenderTab = () => {
     const siteRows = sites.map(s => {
       const v = NK.v.site(s);
       const sup = NK.siteSupport(s);
-      const siteDisps = NK.db.dispatches.filter(d => d.siteId === s.id && d.status !== '已闭环');
+      const siteDisps = NK.db.dispatches.filter(d => d.siteId === s.id && NK.dispatchActive(d));
       return `<tr>
         <td><div style="font-weight:600">${NK.esc(v.name)}</div><div class="num" style="font-size:11px">${s.id}</div></td>
         <td>${NK.esc(s.province)} · ${NK.esc(s.city)}</td>
@@ -3295,7 +3341,7 @@ UI.siteDetail = (id) => {
       <div class="focus-item">
         ${UI.priBadge(d.priority)}
         <div class="fi-main"><div class="fi-title">${NK.esc(d.title)}</div>
-        <div class="fi-meta">${d.no} · ${UI.statusBadge(d.status)} · ${NK.esc(NK.v.engName(d.engineer))} · ${d.createdAt.slice(0, 10)}</div></div>
+        <div class="fi-meta">${d.no} · ${UI.statusBadge(NK.dispatchStatusLabel(d))} · ${NK.esc(NK.v.engName(d.engineer))} · ${d.createdAt.slice(0, 10)}</div></div>
         <div class="fi-actions"><button class="btn btn-sm" onclick="UI.dispatchDetail('${d.id}')">查看</button></div>
       </div>`).join('') : '<div class="tbl-empty" style="padding:20px">该职场暂无派单记录</div>'}</div>`,
     `<button class="btn" data-close>关闭</button>
@@ -3449,7 +3495,7 @@ UI.engDetail = (id) => {
       <div class="card-body flush" style="max-height:180px;overflow:auto">${disps.slice(0, 10).map(d => `
         <div class="focus-item">${UI.priBadge(d.priority)}
         <div class="fi-main"><div class="fi-title">${NK.esc(d.title)}</div>
-        <div class="fi-meta">${d.no} · ${UI.statusBadge(d.status)} · ${d.createdAt.slice(0, 10)}</div></div>
+        <div class="fi-meta">${d.no} · ${UI.statusBadge(NK.dispatchStatusLabel(d))} · ${d.createdAt.slice(0, 10)}</div></div>
         <div class="fi-actions"><button class="btn btn-sm" onclick="UI.dispatchDetail('${d.id}')">查看</button></div></div>`).join('')}</div>` : ''}`,
     `<button class="btn" data-close>关闭</button>`,
     { size: 'modal-lg' });
@@ -4058,7 +4104,7 @@ UI.kpiExportCSV = (month) => {
 UI.renderReports = () => {
   const el = document.getElementById('view-reports');
   const today = NK.today();
-  const openDisps = NK.db.dispatches.filter(d => d.status !== '已闭环' && d.status !== '已取消').length;
+  const openDisps = NK.db.dispatches.filter(d => NK.dispatchActive(d)).length;
   const openTasks = NK.db.tasks.filter(t => t.status !== '已完成' && t.status !== '已取消').length;
   const openProjs = NK.db.projects.filter(p => p.status !== '已完成' && p.status !== '已取消').length;
   const overdue = NK.genReminders().filter(x => x.level === 'danger').length;
@@ -4167,17 +4213,18 @@ UI.weekReport = () => {
   const start = new Date(Date.now() - 6 * 86400000);
   const s = NK.fmtDate(start);
   const disps = NK.db.dispatches.filter(d => d.createdAt.slice(0, 10) >= s && d.createdAt.slice(0, 10) <= end);
+  const formalDisps = disps.filter(d => NK.dispatchStatusKey(d) !== 'draft' && d.recordStatus !== '已删除');
   const tasks = NK.db.tasks.filter(t => t.createdAt.slice(0, 10) >= s && t.createdAt.slice(0, 10) <= end);
   const done = NK.db.tasks.filter(t => t.doneAt && t.doneAt.slice(0, 10) >= s && t.doneAt.slice(0, 10) <= end);
   const evs = NK.db.kpiEvents.filter(e => e.date >= s && e.date <= end);
   const text = [
     `══════ IT运维周报（${s} 至 ${end}）══════`,
     `一、总体概况`,
-    `  新建派单 ${disps.length} 单，新建任务 ${tasks.length} 条，完成任务 ${done.length} 条。`,
-    `  当前进行中：派单 ${NK.db.dispatches.filter(d => d.status !== '已闭环' && d.status !== '已取消').length} 单 / 任务 ${NK.db.tasks.filter(t => t.status !== '已完成').length} 条 / 专项 ${NK.db.projects.filter(p => p.status !== '已完成').length} 个。`,
+    `  新建正式派单 ${formalDisps.length} 单（草稿 ${disps.length - formalDisps.length} 条未计入），新建任务 ${tasks.length} 条，完成任务 ${done.length} 条。`,
+    `  当前进行中：派单 ${NK.db.dispatches.filter(d => NK.dispatchActive(d)).length} 单 / 任务 ${NK.db.tasks.filter(t => t.status !== '已完成').length} 条 / 专项 ${NK.db.projects.filter(p => p.status !== '已完成').length} 个。`,
     ``,
     `二、派单明细`,
-    disps.length ? disps.map(d => `  • [${d.priority}] ${d.no} ${d.title}（${d.city}）→ ${d.engineer}，${d.status}`).join('\n') : `  （本周无新建派单）`,
+    formalDisps.length ? formalDisps.map(d => `  • [${d.priority}] ${d.no} ${d.title}（${d.city}）→ ${d.engineer}，${NK.dispatchStatusLabel(d)}`).join('\n') : `  （本周无新建派单）`,
     ``,
     `三、任务完成情况`,
     done.length ? done.slice(0, 15).map(t => `  ✓ ${t.no} ${t.name}${t.siteName ? '（' + t.siteName + '）' : ''}`).join('\n') : `  （本周无完成任务）`,
@@ -4196,7 +4243,9 @@ UI.weekReport = () => {
 /** 月报 */
 UI.monthReport = () => {
   const month = NK.curMonth();
-  const disps = NK.db.dispatches.filter(d => d.createdAt.slice(0, 7) === month);
+  const allDisps = NK.db.dispatches.filter(d => d.createdAt.slice(0, 7) === month);
+  // 正式派单：排除草稿与已删除（recordStatus）
+  const disps = allDisps.filter(d => NK.dispatchStatusKey(d) !== 'draft' && d.recordStatus !== '已删除');
   const tasks = NK.db.tasks.filter(t => t.createdAt.slice(0, 7) === month);
   const done = NK.db.tasks.filter(t => t.doneAt && t.doneAt.slice(0, 7) === month);
   const kpiRows = NK.db.engineers.map(e => { const k = NK.computeKpi(e.name, month); return `${k.engineer}:${k.final}分`; }).join('  ');
@@ -4205,21 +4254,39 @@ UI.monthReport = () => {
     const nd = NK.db.dispatches.filter(d => d.engineer === e.name && d.createdAt.slice(0, 7) === month).length;
     return `  ${e.name}：任务${n} / 派单${nd}`;
   }).join('\n');
+  // 新状态统计：草稿/已删除不计入正式总数
+  const sToday = d => NK.dispatchStatusKey(d);
+  const countSt = k => disps.filter(d => sToday(d) === k).length;
+  const completed = countSt('completed');
+  const revoked = countSt('revoked');
+  const exception = countSt('exception');
+  const pendingSend = countSt('pending_send');
+  const sent = countSt('sent');
+  // 供应商分布
+  const suppStat = NK.SUPPLIERS.map(s => {
+    const c = disps.filter(d => { const g = NK.getSupplierOf(d); return g && g.id === s.id; }).length;
+    return `${s.name}${c}条`;
+  }).join('，');
+  const noSupp = disps.filter(d => !NK.getSupplierOf(d)).length;
   const text = [
     `══════ IT运维月报（${month}）══════`,
     `一、总体概况`,
-    `  新建派单 ${disps.length} 单，新建任务 ${tasks.length} 条，完成任务 ${done.length} 条。`,
+    `  新建正式派单 ${disps.length} 单（草稿 ${allDisps.filter(d => sToday(d) === 'draft').length} 条未计入），新建任务 ${tasks.length} 条，完成任务 ${done.length} 条。`,
     ``,
-    `二、工程师工单量`,
+    `二、派单状态分布`,
+    `  待发送 ${pendingSend} 条 / 已发送 ${sent} 条 / 异常待处理 ${exception} 条 / 已完成 ${completed} 条 / 已撤销 ${revoked} 条`,
+    `  供应商：${suppStat}${noSupp > 0 ? `，未标注 ${noSupp} 条` : ''}`,
+    ``,
+    `三、工程师工单量`,
     engStat,
     ``,
-    `三、工程师KPI`,
+    `四、工程师KPI`,
     `  ${kpiRows}`,
     ``,
-    `四、专项进度`,
+    `五、专项进度`,
     NK.db.projects.filter(p => p.status !== '已取消').map(p => `  • ${p.name}（${p.status}，完成率${p.progress || 0}%）`).join('\n') || `  （无专项）`,
     ``,
-    `五、本月KPI事件`,
+    `六、本月KPI事件`,
     NK.db.kpiEvents.filter(e => e.date.slice(0, 7) === month).length ? NK.db.kpiEvents.filter(e => e.date.slice(0, 7) === month).map(e => `  • ${e.date} ${e.engineer} ${e.itemName} ${e.points > 0 ? '+' : ''}${e.points}分：${e.reason}`).join('\n') : `  （本月无KPI事件）`,
     ``,
     `──── 由 卢女开·IT运维指挥台 自动生成 ────`,
@@ -4587,7 +4654,7 @@ UI.renderAbout = () => {
   const el = document.getElementById('view-about');
   const feats = [
     ['＋ 新建派单', '按城市选职场（同城多职场必须选具体地点），自动带出联系人/电话/地址/默认工程师，生成派单消息，自动创建跟进任务'],
-    ['☰ 任务闭环', '派单自动生成任务；由花姐在系统内维护派单状态：已生成→已发送→跟进中→处理中→等待外部条件→已处理→待花姐验收→已闭环；工程师通过微信/Teams/电话沟通，响应与超时由花姐记录的时间自动判定'],
+    ['☰ 任务闭环', '派单自动生成任务；由花姐在系统内维护派单状态：草稿→待发送→已发送→异常待处理→已完成/已撤销；工程师通过微信/Teams/电话沟通，响应与超时由花姐记录的时间自动判定'],
     ['◉ 今日指挥台', '状态概览 + 快捷操作工具条 + 重点盯三件事 + 今日时间轴，打开就知道今天该做什么'],
     ['▣ 专项管理', '季度巡检模板（自动生成11项巡检子任务）、补丁更新、搬迁撤场、通用项目，进度/风险/子任务清单'],
     ['◬ KPI绩效', '可配置规则（9项扣分+3项加分），每月自动计算，工单量/响应速度/超时自动判定，事件台账证据可追溯'],
@@ -4600,7 +4667,7 @@ UI.renderAbout = () => {
     ['湖州职场打印机故障', '在派单中心输入"湖州"→ 自动带出职场/联系人/地址/工程师沈煜钦 → 确认派单 → 消息自动生成 → 任务自动创建'],
     ['同城多职场（南京/北京）', '输入城市出现多个职场，必须选择具体地点后才可派单，避免派错'],
     ['无需派单提示', '驻场工程师所在地职场标记"无需派单"，仍可创建任务跟踪'],
-    ['派单全流程闭环', '已生成→复制发送→跟进中→处理中→等待外部条件→已处理→待花姐验收→已闭环，全程由花姐留痕'],
+    ['派单全流程闭环', '草稿→待发送→已发送→异常待处理→已完成/已撤销，全程由花姐留痕'],
     ['KPI自动计算', '每月按规则自动算分：响应>1h扣分、逾期扣分、工单量对照标准、表扬加分'],
     ['休假交接', '一键生成休假期间每日固定工作+到期派单+进行中事项+风险清单'],
     ['演示模式脱敏', '切换后职场名/姓名/电话/地址全部脱敏，适合作品展示'],

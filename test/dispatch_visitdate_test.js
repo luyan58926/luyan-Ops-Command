@@ -340,7 +340,7 @@ run(`while (UI.__stack.length) UI.modalClose();`);
 const r = run(`NK.setVisitDate('${oldId}', '2026-08-07');`);
 ok(r && r.visitDate === '2026-08-07', '补充上门日期成功');
 ok(run(`NK.getDispatch('${oldId}').visitDate === '2026-08-07'`), '派单上门日期已更新');
-ok(run(`NK.getDispatch('${oldId}').status === '已生成'`), '补充日期不改变派单状态（仍已生成）');
+ok(run(`NK.dispatchStatusKey(NK.getDispatch('${oldId}')) === 'pending_send'`), '补充日期不改变派单状态（仍为待发送）');
 ok(run(`NK.getDispatch('${oldId}').visitDateHistory.length === 1`), '记录 1 条修改历史');
 ok(run(`NK.getDispatch('${oldId}').visitDateHistory[0].from === '未填写'`), '历史 from=未填写');
 ok(run(`NK.getDispatch('${oldId}').visitDateHistory[0].to === '2026-08-07'`), '历史 to=2026-08-07');
@@ -377,7 +377,7 @@ ok(run(`NK.db.tasks.some(t => t.dispatchId === '${p1}')`), '关联任务仍自�
 // 撤销功能不受影响
 const rev = run(`NK.revokeDispatch('${p1}', { reason:'测试撤销', cancelTask:true });`);
 ok(rev.ok === true, '撤销功能正常');
-ok(run(`NK.getDispatch('${p1}').status === '已撤销'`), '撤销后状态=已撤销');
+ok(run(`NK.dispatchStatusKey(NK.getDispatch('${p1}')) === 'revoked'`), '撤销后状态=revoked(已撤销)');
 // 删除功能不受影响（重新建一条）
 const p2 = mkDispatch({ title: '待删除派单' });
 const del = run(`NK.softDeleteDispatch('${p2}', { reason:'重复创建' });`);

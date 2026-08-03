@@ -112,7 +112,7 @@ ok(run(`NK.db.tasks.some(t=>t.dispatchId==='${d2}')`), '创建派单自动关联
 r = run(`NK.revokeDispatch('${d2}', { reason: '用户取消上门', cancelTask: true })`);
 ok(r.ok === true, '撤销成功');
 ok(r.msg.includes('不会再进入催办'), '撤销提示含"不会再进入催办"');
-ok(run(`NK.db.dispatches.find(x=>x.id==='${d2}').status === '已撤销'`), '撤销后 status=已撤销');
+ok(run(`NK.dispatchStatusKey(NK.db.dispatches.find(x=>x.id==='${d2}')) === 'revoked'`), '撤销后 status=revoked(已撤销)');
 ok(run(`NK.db.dispatches.find(x=>x.id==='${d2}').revokeReason === '用户取消上门'`), '保存撤销原因');
 ok(run(`NK.db.dispatches.find(x=>x.id==='${d2}').revokedBy === '花姐'`), '保存操作人=花姐');
 ok(run(`NK.db.dispatches.find(x=>x.id==='${d2}').revokedAt !== ''`), '保存撤销时间');
@@ -133,7 +133,7 @@ ok(run(`NK.db.tasks.some(t=>t.dispatchId==='${d2}')`), '关联任务不永久删
 console.log('== 场景三：已处理派单禁止普通删除 → 引导撤销 ==');
 reset();
 const d3 = mkDispatch({ title: '已处理故障' });
-run(`NK.db.dispatches.find(x=>x.id==='${d3}').status = '已处理';`);
+run(`NK.db.dispatches.find(x=>x.id==='${d3}').status = 'completed';`);
 r = run(`NK.softDeleteDispatch('${d3}')`);
 ok(r.ok === false && r.blocked === true, '已处理派单普通删除被阻止');
 ok(r.canRevoke === true, '返回 canRevoke=true（引导撤销）');
@@ -154,7 +154,7 @@ ok(run(`!NK.db.tasks.some(t=>t.dispatchId==='${d4}')`), '撤销后任务解绑�
 // 恢复已撤销派单
 r = run(`NK.unrevokeDispatch('${d4}')`);
 ok(r.ok === true, '恢复已撤销派单成功');
-ok(run(`NK.db.dispatches.find(x=>x.id==='${d4}').status === '已生成'`), '恢复后 status=已生成');
+ok(run(`NK.dispatchStatusKey(NK.db.dispatches.find(x=>x.id==='${d4}')) === 'pending_send'`), '恢复后 status=pending_send(待发送)');
 ok(run(`NK.dispatchActive(NK.db.dispatches.find(x=>x.id==='${d4}'))`), '恢复后重新为正常派单');
 // 已撤销派单撤销操作被拒绝
 run(`NK.revokeDispatch('${d4}', { reason: '重复', cancelTask: true })`);
@@ -188,15 +188,15 @@ reset();
 const d6a = mkDispatch({ title: '待发送派单A' });
 const d6b = mkDispatch({ title: '待发送派单B' });
 // 初始：2 条待发送
-const before = run(`NK.db.dispatches.filter(d=>d.status==='已生成' && !NK.dispatchInactive(d)).length`);
+const before = run(`NK.db.dispatches.filter(d=>NK.dispatchStatusKey(d)==='pending_send' && !NK.dispatchInactive(d)).length`);
 ok(before === 2, '初始 2 条待发送');
 // 撤销一条 → 待发送变 1
 run(`NK.revokeDispatch('${d6a}', { reason: '用户取消上门', cancelTask: true })`);
-const after = run(`NK.db.dispatches.filter(d=>d.status==='已生成' && !NK.dispatchInactive(d)).length`);
+const after = run(`NK.db.dispatches.filter(d=>NK.dispatchStatusKey(d)==='pending_send' && !NK.dispatchInactive(d)).length`);
 ok(after === 1, '撤销后待发送数减为 1');
 // 删除另一条 → 待发送变 0
 run(`NK.softDeleteDispatch('${d6b}', { reason: '重复创建' })`);
-const after2 = run(`NK.db.dispatches.filter(d=>d.status==='已生成' && !NK.dispatchInactive(d)).length`);
+const after2 = run(`NK.db.dispatches.filter(d=>NK.dispatchStatusKey(d)==='pending_send' && !NK.dispatchInactive(d)).length`);
 ok(after2 === 0, '删除后待发送数减为 0');
 // 首页概览统计（助手/概览）同样过滤
 ok(run(`NK.db.dispatches.filter(d=>!NK.dispatchInactive(d)).length === 0`), '所有正常统计均排除撤销/删除派单');
@@ -205,19 +205,19 @@ run(`NK.save()`);
 const reloadOk = run(`
   (() => {
     const raw = localStorage.getItem('nk_ops_command_v1');
-    return raw && JSON.parse(raw).dispatches.every(d => d.status==='已撤销' || d.recordStatus==='已删除');
+    return raw && JSON.parse(raw).dispatches.every(d => NK.dispatchStatusKey(d)==='revoked' || d.recordStatus==='已删除');
   })()
 `);
 ok(reloadOk, '持久化后刷新仍保持撤销/删除状态');
 // 回收站可查（已删除仍可在 dispatches 找到且标记 recordStatus）
 ok(run(`NK.db.dispatches.some(d=>d.recordStatus==='已删除')`), '已删除记录仍在回收站中可查');
 // 已撤销可查
-ok(run(`NK.db.dispatches.some(d=>d.status==='已撤销')`), '已撤销记录仍在历史中可查');
+ok(run(`NK.db.dispatches.some(d=>NK.dispatchStatusKey(d)==='revoked')`), '已撤销记录仍在历史中可查');
 
 console.log('== KPI 保护 ==');
 reset();
 const dk = mkDispatch({ title: 'KPI保护派单' });
-run(`NK.db.dispatches.find(x=>x.id==='${dk}').status = '待花姐验收';`);
+run(`NK.db.dispatches.find(x=>x.id==='${dk}').status = 'sent';`);
 // KPI 自动统计不应计入撤销/删除派单
 run(`NK.revokeDispatch('${dk}', { reason: '用户取消上门', cancelTask: true })`);
 ok(run(`!NK.genFocusItems().some(r=>r.type==='dispatch' && r.itemId==='${dk}')`), '撤销派单不计入 KPI 相关重点');

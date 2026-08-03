@@ -239,7 +239,7 @@ ok(run(`NK.dispatchSupplierLabel(NK.getDispatch('${oldId}')) === '未标注'`), 
 // 6a. 详情页显示「未标注」+ 补充供应商按钮
 run(`UI.dispatchDetail('${oldId}');`);
 const dhtml = run(`(() => { const m = UI.__stack ? UI.__stack[0] : null; return m && m.layer ? m.layer.innerHTML : ''; })()`);
-ok(dhtml.includes('补充供应商'), '旧派单详情显示「补充供应商」按钮');
+ok(dhtml.includes('修改供应商') && dhtml.includes('ddSupEditBox'), '旧派单详情显示「修改供应商」按钮');
 ok(dhtml.includes('id="ddSupEditBox"') && dhtml.includes('data-sup="yuanchen"') && dhtml.includes('data-sup="yabei"'), '详情含供应商编辑框（源晨/亚北）');
 run(`while (UI.__stack.length) UI.modalClose();`);
 // 6b. 补充供应商为源晨
@@ -250,7 +250,7 @@ ok(run(`NK.getDispatch('${oldId}').supplierHistory.length === 1`), '补充记录
 ok(run(`NK.getDispatch('${oldId}').supplierHistory[0].fromName === '未标注' && NK.getDispatch('${oldId}').supplierHistory[0].toName === '源晨'`), '历史记录 from=未标注 to=源晨');
 ok(run(`NK.getDispatch('${oldId}').supplierUpdatedAt !== ''`), '记录 supplierUpdatedAt 修改时间');
 ok(run(`NK.getDispatch('${oldId}').no !== ''`), '补充不改派单编号');
-ok(run(`NK.getDispatch('${oldId}').status === '已生成'`), '补充不改派单状态');
+ok(run(`NK.dispatchStatusKey(NK.getDispatch('${oldId}')) === 'pending_send'`), '补充不改派单状态（仍为待发送）');
 // 6c. 补充后立即参与筛选统计（源晨+8月应命中该条）
 const listOld = run(`NK.filterByVisitRange(NK.filterBySupplier(NK.db.dispatches, '源晨'), '2026-08-01', '2026-08-31')`);
 ok(Array.isArray(listOld) && listOld.length === 1 && listOld[0].id === oldId, '补充后立即参与「源晨+8月」筛选');

@@ -187,7 +187,7 @@
     return pros.map(p => ({ p, s: score(p) })).filter(x => x.s > 0).sort((a, b) => b.s - a.s).map(x => x.p);
   };
 
-  /** 匹配派单：支持编号(no)/标题/职场/工程师；默认排除已删除/已撤销/已取消/已闭环 */
+  /** 匹配派单：支持编号(no)/标题/职场/工程师；默认排除已删除/已撤销/已取消/已完成 */
   A.matchDispatch = (kw, opts = {}) => {
     kw = (kw || '').trim();
     if (!kw) return [];
@@ -195,7 +195,7 @@
     const disps = (NK.db.dispatches || []).filter(d => {
       if (includeAll) return true;
       if (d.recordStatus === '已删除') return false;
-      if (d.status === '已撤销' || d.status === '已取消' || d.status === '已闭环') return false;
+      if (NK.dispatchInactive(d)) return false;
       return true;
     });
     const score = (d) => {
@@ -348,7 +348,7 @@
       }
       // 状态关键词
       let status = '';
-      const stM = (q.match(/已发送|待花姐验收|已生成|已验收|已闭环|已撤销|已取消|已暂停|待工程师确认|已确认/) || [])[0];
+      const stM = (q.match(/异常待处理|待发送|已发送|草稿|已完成|已撤销|待花姐验收|已生成|已闭环|已验收|已取消|已暂停/) || [])[0];
       if (stM) status = stM;
       return Object.assign(intent, {
         intent: 'query', action: 'dispatch', targetModule: 'dispatch',
@@ -579,7 +579,7 @@
       return [{ text: `🙂 今天${NK.db.engineers.length}名工程师均在岗，无人休假。` }];
     }
     const lines = leaves.map(l => {
-      const cover = l.dispatchStatus === '已闭环' || l.dispatchRequired === '否' ? '无需派单' : (l.dispatchStatus === '已安排' ? '已安排补位' : '未安排补位');
+      const cover = l.dispatchRequired === '否' ? '无需派单' : (l.dispatchStatus === '已创建派单' ? '已安排补位' : '未安排补位');
       return `- ${NK.v.engName(l.engineerName)}：${l.leavePeriod === '全天' ? '全天' : (l.leavePeriod + '时段')}，${cover}`;
     });
     return [{ text: `花姐，今天有 ${leaves.length} 名工程师休假：\n` + lines.join('\n') }];
@@ -616,7 +616,10 @@
     const blocks = [];
     const daily = (NK.db.tasks || []).filter(t => t.status === '待处理' && t.templateId && NK.FIXED_DAILY().some(x => x.id === t.templateId));
     const projPending = (NK.db.projects || []).filter(p => p.status === '未开始' || p.status === '进行中');
-    const disp = (NK.db.dispatches || []).filter(d => d.status === '已生成' || d.status === '待花姐验收');
+    const disp = (NK.db.dispatches || []).filter(d => {
+      const k = NK.dispatchStatusKey(d);
+      return k === 'pending_send' || k === 'exception';
+    });
     const leave = NK.leavesToday();
     const manual = (NK.db.tasks || []).filter(t => t.status === '待处理' && !t.templateId);
 
@@ -685,7 +688,7 @@
     const urgent = rem.filter(x => x.level === 'danger');
     const disps = NK.db.dispatches;
     return [{
-      text: `花姐，今天共 ${rem.length} 项提醒：P1/超时 ${urgent.length} 项、待发送 ${disps.filter(d => d.status === '已生成').length} 项、待验收 ${disps.filter(d => d.status === '待花姐验收').length} 项。${urgent.length ? '\n优先级最高：' + urgent.slice(0, 3).map(u => u.title).join('；') : '\n今天没有超时事项 ✨'}`,
+      text: `花姐，今天共 ${rem.length} 项提醒：P1/超时 ${urgent.length} 项、待发送 ${disps.filter(d => NK.dispatchStatusKey(d) === 'pending_send').length} 项、异常待处理 ${disps.filter(d => NK.dispatchStatusKey(d) === 'exception').length} 项。${urgent.length ? '\n优先级最高：' + urgent.slice(0, 3).map(u => u.title).join('；') : '\n今天没有超时事项 ✨'}`,
       actions: urgent.length ? [{ label: '查看实时告警', act: 'nav', arg: 'tasks' }] : undefined,
     }];
   };
@@ -708,13 +711,19 @@
     if (kw) {
       list = list.filter(d => `${d.no || ''} ${d.title || ''} ${d.siteName || ''} ${d.city || ''} ${d.engineer || ''}`.indexOf(kw) !== -1);
     }
-    // 状态
-    if (status) list = list.filter(d => d.status === status);
+    // 状态（兼容新/旧状态关键词，统一按枚举 key 过滤）
+    if (status) {
+      const stKey = NK.DISPATCH_STATUS_KEY[status] || (NK.DISPATCH_STATUS_LABEL[status] ? status : null);
+      list = list.filter(d => {
+        if (stKey) return NK.dispatchStatusKey(d) === stKey;
+        return NK.dispatchStatusLabel(d) === status;
+      });
+    }
     if (!list.length) {
       return [{ text: `花姐，${label}${supplier ? '「' + supplier + '」' : ''}${kw ? '「' + kw + '」' : ''}${status ? '（' + status + '）' : ''}没有找到派单记录～` }];
     }
     const head = `${label}${supplier ? ' · ' + supplier : ''}${kw ? ' · ' + kw : ''}${status ? ' · ' + status : ''}共 ${list.length} 条派单：`;
-    const lines = list.slice(0, 12).map(d => `• ${d.no}｜${d.title}｜${d.siteName || d.city || '—'}｜${NK.dispatchSupplierLabel(d)}｜${d.engineer || '—'}｜${d.visitDate || '未填写'}｜${d.status}`).join('\n');
+    const lines = list.slice(0, 12).map(d => `• ${d.no}｜${d.title}｜${d.siteName || d.city || '—'}｜${NK.dispatchSupplierLabel(d)}｜${d.engineer || '—'}｜${d.visitDate || '未填写'}｜${NK.dispatchStatusLabel(d)}`).join('\n');
     const more = list.length > 12 ? `\n……等共 ${list.length} 条` : '';
     return [{
       text: head + '\n' + lines + more,
@@ -992,7 +1001,7 @@
     const v = NK.v.dispatch(d);
     const site = v.siteName || d.city || '—';
     const eng = v.engineer || '—';
-    return `派单 ${d.no}｜${v.title}\n职场：${site}　工程师：${eng}　状态：${d.status}`;
+    return `派单 ${d.no}｜${v.title}\n职场：${site}　工程师：${eng}　状态：${NK.dispatchStatusLabel(d)}`;
   };
 
   /** 撤销派单（业务取消；唯一匹配先展示摘要确认） */
@@ -1010,7 +1019,7 @@
     if (!d) {
       return [{ text: `花姐，没找到「${intent.matchKw}」这条进行中的派单～ 你可以用派单编号或职场/事项名称描述。` }];
     }
-    if (d.status === '已撤销') return [{ text: `花姐，派单 ${d.no} 已经是"已撤销"状态了。` }];
+    if (NK.dispatchStatusKey(d) === 'revoked') return [{ text: `花姐，派单 ${d.no} 已经是"已撤销"状态了。` }];
     if (d.recordStatus === '已删除') return [{ text: `花姐，派单 ${d.no} 已在回收站中，请先恢复再撤销。` }];
     return [{
       text: `我将撤销这条派单，撤销后不再进入催办和超时提醒，但会保留完整记录：\n${A._dispatchSummary(d)}\n确认撤销吗？`,
@@ -1036,9 +1045,9 @@
     if (!d) {
       return [{ text: `花姐，没找到「${intent.matchKw}」这条派单～ 你可以用派单编号或职场/事项名称描述。` }];
     }
-    // 探测是否可普通删除（已处理需引导撤销）—— 仅判断状态，不真正执行删除
-    const processed = ['已发送', '跟进中', '处理中', '等待外部条件', '已处理', '待花姐验收', '已闭环'];
-    if (processed.includes(d.status) && d.recordStatus !== '已删除') {
+    // 探测是否可普通删除（正式派单需引导撤销）—— 仅判断状态，不真正执行删除
+    const processed = ['sent', 'exception', 'completed'];
+    if (processed.includes(NK.dispatchStatusKey(d)) && d.recordStatus !== '已删除') {
       return [{
         text: `花姐，派单 ${d.no} 已经产生处理记录，建议用「撤销派单」保留过程留痕：\n${A._dispatchSummary(d)}\n要改为撤销吗？`,
         requiresConfirmation: true,
@@ -1062,7 +1071,7 @@
   A.confirmRevokeDispatch = (id) => {
     const d = NK.getDispatch(id);
     if (!d) return { ok: false, msg: '找不到这条派单' };
-    if (d.status === '已撤销') return { ok: false, msg: `派单 ${d.no} 已经撤销过了` };
+    if (NK.dispatchStatusKey(d) === 'revoked') return { ok: false, msg: `派单 ${d.no} 已经撤销过了` };
     const snap = A._snapshot(['dispatches', 'tasks', 'leaves']);
     const res = NK.revokeDispatch(id, { reason: '花姐助手撤销', cancelTask: true });
     if (!res.ok) return { ok: false, msg: res.msg };

@@ -249,11 +249,11 @@ let rv = handle('撤销山东青岛打印机派单');
 ok(rv[0].text.indexOf('撤销') !== -1 && rv[0].text.indexOf('山东青岛打印机处理') !== -1, '撤销派单指令返回摘要确认');
 ok(rv[0].requiresConfirmation === true, '撤销派单需确认');
 ok(rv[0].actions.some(a => a.act === 'assistantConfirmRevokeDispatch'), '提供确认撤销按钮');
-ok(run('NK.db.dispatches[0].status !== \'已撤销\''), '未确认前不执行撤销');
+ok(run('NK.dispatchStatusKey(NK.db.dispatches[0]) !== \'revoked\''), '未确认前不执行撤销');
 // 确认后执行撤销
 let cr = run('NK.assistant.confirmRevokeDispatch("' + revD + '")');
 ok(cr.ok === true, '确认撤销成功');
-ok(run('NK.db.dispatches[0].status === \'已撤销\''), '确认后状态改为已撤销');
+ok(run('NK.dispatchStatusKey(NK.db.dispatches[0]) === \'revoked\''), '确认后状态改为已撤销');
 ok(run('NK.db.dispatches[0].revokedBy === \'花姐\''), '撤销操作人=花姐');
 // 已撤销派单再撤销 → 被拒绝
 cr = run('NK.assistant.confirmRevokeDispatch("' + revD + '")');
@@ -261,7 +261,7 @@ ok(cr.ok === false, '重复撤销被拒绝');
 // 助手撤销操作可撤销（undo 恢复）
 const undoR = run('NK.assistant.undoLast()');
 ok(undoR.ok === true, '助手撤销操作可撤销');
-ok(run('NK.db.dispatches[0].status !== \'已撤销\''), '撤销后派单状态恢复');
+ok(run('NK.dispatchStatusKey(NK.db.dispatches[0]) !== \'revoked\''), '撤销后派单状态恢复');
 
 console.log('== 十三、删除派单指令二次确认 ==');
 // 删除一条未发送派单 → 需二次确认

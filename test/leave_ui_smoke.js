@@ -129,7 +129,7 @@ ok(bodyHTML.includes('补位状态') || bodyHTML.includes('休假'), '休假记�
 
 console.log('== 登记休假弹窗 ==');
 run(`UI.leaveCreate();`);
-const modalHTML = run(`document.getElementById('modalRoot').innerHTML`);
+const modalHTML = run(`(() => { const s = UI.__stack; return s.length ? s[s.length-1].layer.innerHTML : ''; })()`);
 ok(modalHTML.includes('登记休假'), '弹出登记休假弹窗');
 ok(modalHTML.includes('休假工程师'), '含工程师选择');
 ok(modalHTML.includes('开始日期') && modalHTML.includes('结束日期'), '含开始/结束日期');
@@ -141,7 +141,34 @@ console.log('== 休假记录列表（renderLeaveRecords）==');
 run(`UI.renderLeaveRecords(document.getElementById('resTabBody'));`);
 const listHTML = run(`document.getElementById('resTabBody').innerHTML`);
 ok(listHTML.includes('全部') && listHTML.includes('今天') && listHTML.includes('明天') && listHTML.includes('本月'), '列表含筛选页签');
+ok(listHTML.includes('待安排补位'), '列表含"待安排补位"筛选');
 ok(listHTML.includes('沈煜钦') && listHTML.includes('余滔'), '列表显示已登记休假');
+ok(listHTML.includes('取消休假'), '操作列含取消休假');
+ok(listHTML.includes('查看关联派单') || listHTML.includes('创建补位派单') || listHTML.includes('去创建'), '操作列含补位派单入口');
+
+console.log('== 独立"休假与补位"管理页面 ==');
+run(`UI.renderLeave();`);
+const leaveViewHTML = run(`document.getElementById('view-leave').innerHTML`);
+const leaveBodyHTML = run(`document.getElementById('leaveTabBody').innerHTML`);
+ok(leaveViewHTML.includes('工程师休假与补位管理'), '页面标题正确');
+ok(leaveViewHTML.includes('及时确认驻场支持是否需要补位'), '副标题正确');
+ok(leaveViewHTML.includes('登记休假'), '右上角含登记休假按钮');
+ok(leaveBodyHTML.includes('沈煜钦') && leaveBodyHTML.includes('余滔'), '页面展示已有休假记录');
+
+console.log('== 首页快捷操作区（6卡·登记休假·移除两卡）==');
+const quickHTML = run(`(() => { NK.currentView = 'home'; UI.renderHome(); return document.getElementById('view-home').innerHTML; })()`);
+const qcCount = (quickHTML.match(/quick-card/g) || []).length;
+ok(qcCount === 6, '快捷卡数量为6（实际 ' + qcCount + '）');
+ok(quickHTML.includes('登记休假') && quickHTML.includes('记休假，补位不遗漏'), '含"登记休假"卡及副文案');
+ok(!quickHTML.includes('查资源'), '首页不再显示"查资源"卡');
+ok(!quickHTML.includes('收到耗材提醒'), '首页不再显示"收到耗材提醒"卡');
+ok(quickHTML.includes('新建派单') && quickHTML.includes('快速记录') && quickHTML.includes('更新进度') && quickHTML.includes('登记KPI') && quickHTML.includes('生成交接'), '其余5张卡保留');
+ok(quickHTML.includes('qc-lavender'), '登记休假卡使用薰衣草点缀样式');
+ok(quickHTML.includes('qc-primary'), '新建派单保持主卡样式');
+
+console.log('== 原功能保留：任务与告警耗材提醒入口 ==');
+const tasksViewHTML = run(`(() => { UI.renderTasks(); return document.getElementById('view-tasks').innerHTML; })()`);
+ok(tasksViewHTML.includes('收到耗材提醒'), '任务与告警保留"收到耗材提醒"入口');
 
 console.log('== 补位派单：职场快照与多职场选择 ==');
 // 所有工程师均负责 2+ 个职场 → 生产实际走"多职场选择"路径（单一职场路径为兜底）
@@ -156,7 +183,7 @@ ok(snapCheck.hasId && snapCheck.hasName, '快照含 siteId/siteName 字段');
 console.log('== 补位派单：多职场选择弹窗 ==');
 const leaveId = run(`NK.db.leaves.find(x => x.engineerName === '余滔').leaveId`);
 run(`UI.leaveCreateDispatch(${JSON.stringify(leaveId)});`);
-const pickerHTML = run(`document.getElementById('modalRoot').innerHTML`);
+const pickerHTML = run(`(() => { const s = UI.__stack; return s.length ? s[s.length-1].layer.innerHTML : ''; })()`);
 ok(pickerHTML.includes('本次需要为哪些职场安排补位'), '多职场弹出选择弹窗');
 ok(pickerHTML.includes('leave-site-chk'), '含职场多选');
 ok(pickerHTML.includes('下一步'), '含下一步按钮');

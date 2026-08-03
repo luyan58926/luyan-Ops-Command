@@ -38,34 +38,265 @@ UI.copy = async (text) => {
 UI.empty = (msg, col) => `<tr><td colspan="${col || 6}" class="tbl-empty">${msg}</td></tr>`;
 /** 清空告警按钮用轻量线性图标（清扫/归档感，非红色垃圾桶） */
 UI.ICON_CLEAR = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>`;
+/* ============================================================
+   统一弹窗栈（Modal Stack）
+   - 支持多层弹窗：每层独立 .modal-layer，自带遮罩，z-index 递增
+   - 关闭最上层不影响下层（下层输入内容保留，DOM 不销毁）
+   - 统一关闭接口：× / 取消 / 关闭 / 返回 / Esc / 遮罩点击
+   - 滚动锁定：栈非空时锁定 body，全部关闭后恢复
+   - 焦点管理：打开聚焦首输入，关闭归还焦点到打开按钮
+   - 未保存内容：编辑类弹窗通过 opts.onBeforeClose 判断，走统一确认
+   ============================================================ */
+UI.__stack = [];              // 每层 {layer, modal, mask, titleBtn, onBeforeClose, onClosed}
+UI.__dirtyMap = new WeakMap(); // modal 节点 -> dirty 判断函数
+UI.__openedBy = new WeakMap(); // modal 节点 -> 触发按钮（焦点归还）
+UI.__scrollPos = null;
+
+/** 打开一个弹窗层（压栈）。参数与旧 UI.modal 兼容。 */
 UI.modal = (title, bodyHTML, footHTML, opts) => {
   opts = opts || {};
   const root = document.getElementById('modalRoot');
-  root.innerHTML = `
+  root.classList.remove('hidden');
+
+  const layer = document.createElement('div');
+  layer.className = 'modal-layer';
+  layer.style.zIndex = 200 + UI.__stack.length * 10;
+  layer.innerHTML = `
+    <div class="modal-mask" data-mask></div>
     <div class="modal ${opts.size || ''}">
       <div class="modal-head"><div class="modal-title">${title}</div>
-      <button class="modal-close" data-close>×</button></div>
+      <button class="modal-close" type="button" aria-label="关闭" data-close>×</button></div>
       <div class="modal-body">${bodyHTML}</div>
       ${footHTML ? `<div class="modal-foot">${footHTML}</div>` : ''}
     </div>`;
-  root.classList.remove('hidden');
-  root.querySelector('[data-close]').onclick = () => UI.modalClose();
-  if (opts.onMount) opts.onMount(root);
+  root.appendChild(layer);
+
+  const modalEl = layer.querySelector('.modal');
+  const maskEl  = layer.querySelector('.modal-mask');
+  const headBtn = layer.querySelector('.modal-head [data-close]');
+  const topBtn  = UI.__lastTrigger && document.activeElement && document.body.contains(document.activeElement)
+    ? (document.activeElement.closest('[data-open],button') || null) : null;
+
+  const entry = {
+    layer, modal: modalEl, mask: maskEl, headBtn,
+    onBeforeClose: opts.onBeforeClose || null,
+    onClosed: opts.onClosed || null,
+    editable: !!opts.editable,
+    root,
+  };
+  UI.__stack.push(entry);
+
+  // —— 统一关闭逻辑 ——
+  const requestClose = (reason) => { UI.__requestClose(entry, reason); };
+
+  // 1. 绑定所有 [data-close]（head × / foot 取消 / body 取消 …）
+  layer.querySelectorAll('[data-close]').forEach((btn) => {
+    btn.setAttribute('type', 'button');
+    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); requestClose('close'); });
+  });
+  // 确保层内所有非提交按钮均为 type=button（无 <form>，防御性归一）
+  layer.querySelectorAll('button').forEach((b) => {
+    if (!b.getAttribute('type')) b.setAttribute('type', 'button');
+  });
+  // 2. 遮罩点击
+  maskEl.addEventListener('click', () => requestClose('mask'));
+  // 3. 内层面板点击不冒泡到遮罩
+  modalEl.addEventListener('click', (e) => e.stopPropagation());
+
+  // 焦点管理：打开后聚焦弹窗内第一个可输入元素（body 内 input/textarea/select）
+  if (!opts.noAutoFocus) {
+    const f = modalEl.querySelector('.modal-body input:not([type=hidden]), .modal-body textarea, .modal-body select');
+    if (f) setTimeout(() => { try { f.focus(); } catch (e) {} }, 30);
+  }
+
+  // 通用编辑类弹窗：记录初始快照，用于未保存内容判断
+  if (opts.editable) {
+    try {
+      entry.__snapshot = UI.__capture(entry);
+    } catch (e) { entry.__snapshot = null; }
+  }
+
+  if (opts.onMount) opts.onMount(root, layer);
+  UI.__syncScrollLock();
+  return entry;
 };
+
+/** 捕获弹窗内所有可输入控件的值快照 */
+UI.__capture = (entry) => {
+  const controls = entry.layer.querySelectorAll('.modal-body input, .modal-body textarea, .modal-body select');
+  const snap = {};
+  controls.forEach((el) => {
+    const key = el.name || el.id || ('k' + snapCount++);
+    snap[key] = el.value;
+  });
+  return snap;
+};
+let snapCount = 0;
+
+/** 通用未保存判断：当前值与初始快照不一致即为 dirty */
+UI.__isDirty = (entry) => {
+  if (!entry.__snapshot) return false;
+  try {
+    const now = UI.__capture(entry);
+    const keys = new Set([...Object.keys(entry.__snapshot), ...Object.keys(now)]);
+    for (const k of keys) {
+      if ((entry.__snapshot[k] || '') !== (now[k] || '')) return true;
+    }
+    return false;
+  } catch (e) { return false; }
+};
+
+/** 统一关闭请求：onBeforeClose 优先；否则通用 editable 未保存判断；否则直接关闭。
+ *  reason: 'close' | 'mask' | 'esc' | 'save'（save 跳过未保存拦截） */
+UI.__requestClose = (entry, reason) => {
+  const close = () => { UI.modalClose(); };
+  if (entry.onBeforeClose) {
+    entry.onBeforeClose(close, reason);
+  } else if (entry.editable && reason !== 'save' && UI.__isDirty(entry)) {
+    UI.confirmDiscard();
+    return;
+  } else {
+    close();
+  }
+};
+
+/** 关闭最上层弹窗。返回被关闭的层是否成功（未保存被拦截时返回 false）。 */
 UI.modalClose = () => {
-  document.getElementById('modalRoot').classList.add('hidden');
-  document.getElementById('modalRoot').innerHTML = '';
+  const entry = UI.__stack[UI.__stack.length - 1];
+  if (!entry) return true;
+  UI.__stack.pop();
+  const { layer, onClosed } = entry;
+  // 归还焦点到打开该层的按钮（若仍存在）
+  if (onClosed) { try { onClosed(); } catch (e) { console.error('[modal] onClosed error', e); } }
+  if (layer && layer.parentNode) layer.remove();
+  UI.__syncScrollLock();
+  UI.__focusLast(entry);
+  return true;
 };
-UI.confirm = (msg, onOk, okLabel) => {
+
+/** 关闭全部弹窗（供重置/切换等场景） */
+UI.modalCloseAll = () => {
+  while (UI.__stack.length) UI.modalClose();
+  const root = document.getElementById('modalRoot');
+  root.classList.add('hidden');
+  root.innerHTML = '';
+  UI.__syncScrollLock();
+};
+
+/** 同步 body 滚动锁定（栈空恢复滚动，保留滚动位置）。对测试 mock 环境容错。 */
+UI.__syncScrollLock = () => {
+  const body = document.body;
+  const root = document.getElementById('modalRoot');
+  try {
+    if (UI.__stack.length > 0) {
+      if (UI.__scrollPos === null) {
+        UI.__scrollPos = (typeof window !== 'undefined' && window.pageYOffset) || (document.documentElement && document.documentElement.scrollTop) || 0;
+      }
+      body.style.overflow = 'hidden';
+      body.style.position = 'fixed';
+      body.style.top = `-${UI.__scrollPos}px`;
+      body.style.width = '100%';
+    } else {
+      if (UI.__scrollPos !== null) {
+        if (typeof window !== 'undefined' && window.scrollTo) window.scrollTo(0, UI.__scrollPos);
+        UI.__scrollPos = null;
+      }
+      body.style.overflow = '';
+      body.style.position = '';
+      body.style.top = '';
+      body.style.width = '';
+    }
+    if (root) root.classList.toggle('hidden', UI.__stack.length === 0);
+  } catch (e) {
+    // 测试 mock 环境无完整 DOM 时静默跳过滚动锁定
+  }
+};
+
+/** 焦点归还到打开该层的按钮 */
+UI.__focusLast = (entry) => {
+  const trigger = UI.__openedBy.get(entry.modal);
+  if (trigger && document.body.contains(trigger)) {
+    try { trigger.focus({ preventScroll: true }); } catch (e) {}
+  }
+};
+
+/** 记录当前弹窗由哪个按钮打开（用于焦点归还） */
+UI.modalOpenedBy = (btn) => {
+  const top = UI.__stack[UI.__stack.length - 1];
+  if (top) UI.__openedBy.set(top.modal, btn);
+};
+
+/** 统一未保存内容确认弹窗。
+ *  继续编辑 → 关闭确认层，保留原弹窗输入与光标。
+ *  放弃并关闭 → 关闭原弹窗与确认层。
+ */
+UI.confirmDiscard = (dirtyMsg) => {
+  const baseLayer = UI.__stack[UI.__stack.length - 1];
+  if (!baseLayer) return;
+  UI.confirm(
+    `${dirtyMsg || '当前内容还没有保存，确定放弃吗？'}<div style="color:var(--text-3);font-size:12px;margin-top:4px">放弃后，本次未保存的修改不会保留。</div>`,
+    () => { UI.modalClose(); }, // 放弃并关闭：关闭最上层（此时最上层是确认框）
+    '放弃并关闭'
+  );
+  // 注意：确认框打开后成为新最上层；"继续编辑"按钮需二次绑定
+  const layer = UI.__stack[UI.__stack.length - 1];
+  if (layer) {
+    layer.onBeforeClose = null; // 确认框自身直接可关
+    const keepBtn = layer.layer.querySelector('.modal-foot .btn:not([data-close])');
+    // 追加"继续编辑"
+    const foot = layer.layer.querySelector('.modal-foot');
+    if (foot && !foot.querySelector('[data-keep]')) {
+      const k = document.createElement('button');
+      k.type = 'button'; k.className = 'btn btn-accent'; k.setAttribute('data-keep', '1');
+      k.textContent = '继续编辑';
+      foot.insertBefore(k, foot.firstChild);
+      k.addEventListener('click', () => {
+        // 只关闭确认层，保留原弹窗输入
+        UI.modalClose();
+      });
+    }
+  }
+};
+
+/** 确认框：通用确认弹窗（作为新层压栈，关闭不影响底层） */
+UI.confirm = (msg, onOk, okLabel, opts) => {
+  opts = opts || {};
+  const headClose = opts.allowHeadClose !== false;
   UI.modal('请确认', `<div style="padding:6px 2px">${msg}</div>`,
-    `<button class="btn" data-close>取消</button><button class="btn btn-danger" id="cfOk">${okLabel || '确认'}</button>`, {
+    `<button class="btn" type="button" data-close>取消</button><button class="btn btn-danger" id="cfOk" type="button">${okLabel || '确认'}</button>`, {
     size: 'modal-sm',
-    onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
-      root.querySelector('#cfOk').onclick = () => { UI.modalClose(); onOk(); };
+    noAutoFocus: true,
+    onMount(root, layer) {
+      const okBtn = layer.querySelector('#cfOk');
+      const cancelBtn = layer.querySelector('.modal-foot [data-close]');
+      if (okBtn) okBtn.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        // 先关确认层，再执行回调（回调内部可能再开弹窗）
+        const idx = UI.__stack.findIndex(x => x.layer === layer);
+        if (idx >= 0) UI.__stack.splice(idx, 1);
+        if (layer.parentNode) layer.remove();
+        UI.__syncScrollLock();
+        if (onOk) { try { onOk(); } catch (err) { console.error('[confirm] onOk error', err); } }
+      });
+      // 确认框的取消应只关闭确认层本身（不解散底层）
+      if (cancelBtn) cancelBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); UI.modalClose(); });
+      // head × 仅当允许时关闭
+      const headBtn = layer.querySelector('.modal-head [data-close]');
+      if (headBtn && !headClose) headBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); UI.modalClose(); });
     },
   });
 };
+
+/** 全局键盘：Esc 关闭最上层弹窗（尊重 onBeforeClose / 未保存判断） */
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' || e.key === 'Esc') {
+    const top = UI.__stack[UI.__stack.length - 1];
+    if (!top) return;
+    e.preventDefault();
+    e.stopPropagation();
+    UI.__requestClose(top, 'esc');
+  }
+});
 
 /* ================= 导航 ================= */
 UI.nav = (view, arg) => {
@@ -81,7 +312,8 @@ UI.nav = (view, arg) => {
 UI.renderView = (view, arg) => {
   const fns = {
     home: UI.renderHome, dispatch: UI.renderDispatch, tasks: UI.renderTasks,
-    projects: UI.renderProjects, resources: UI.renderResources, kpi: UI.renderKpi,
+    projects: UI.renderProjects, resources: UI.renderResources, leave: UI.renderLeave,
+    kpi: UI.renderKpi,
     reports: UI.renderReports, notes: UI.renderNotes, import: UI.renderImport, settings: UI.renderSettings,
     about: UI.renderAbout,
   };
@@ -95,7 +327,7 @@ UI.refreshBadges = () => {
   const n1 = document.getElementById('navBadgeDispatch');
   const n2 = document.getElementById('navBadgeTasks');
   const n3 = document.getElementById('navBadgeNotes');
-  const waitCount = NK.db.dispatches.filter(x => x.status === '已生成').length;
+  const waitCount = NK.db.dispatches.filter(x => x.status === '已生成' && !NK.dispatchInactive(x)).length;
   n1.textContent = waitCount; n1.classList.toggle('hidden', !waitCount);
   n2.textContent = d; n2.classList.toggle('hidden', !d);
   const notesCount = (NK.db.quickNotes || []).filter(x => !x.archived && !x.deleted).length;
@@ -128,7 +360,7 @@ UI.renderHome = () => {
   const today = NK.today();
 
   const rem = NK.genReminders();
-  const disps = NK.db.dispatches;
+  const disps = NK.db.dispatches.filter(d => !NK.dispatchInactive(d));
   const tasks = NK.db.tasks;
 
   const focusItems = NK.genFocusItems();
@@ -147,15 +379,13 @@ UI.renderHome = () => {
   const quickCards = [
     { icon: '📋', label: '新建派单', sub: '30秒搞定', primary: true, act: 'UI.dispatchCreate()' },
     { icon: '📝', label: '快速记录', sub: '先记下来，别让它溜走', act: 'UI.quickNote()' },
-    { icon: '🔍', label: '查资源', sub: '10秒找到人', act: 'UI.resourcesJump()' },
+    { icon: '🗓️', label: '登记休假', sub: '记休假，补位不遗漏', lavender: true, act: 'UI.leaveCreate()' },
     { icon: '🔄', label: '更新进度', sub: '补一句反馈', act: 'UI.taskCreate(true)' },
     { icon: '📊', label: '登记KPI', sub: '加分扣分都留痕', act: 'UI.kpiEventCreate()' },
     { icon: '📄', label: '生成交接', sub: '一键整理今日', act: 'UI.handoverToday()' },
-    { icon: '🖨️', label: '收到耗材提醒', sub: '记一条跟进', act: "UI.triggerFixed('TPL005')" },
-    { icon: '🔐', label: '记录登录失败告警', sub: '安全告警跟进', act: "UI.triggerFixed('TPL006')" },
   ];
   const quickCardsHTML = quickCards.map(q => 
-    `<a class="quick-card ${q.primary ? 'qc-primary' : ''}" href="javascript:void(0)" onclick="${q.act}">
+    `<a class="quick-card ${q.primary ? 'qc-primary' : ''}${q.lavender ? ' qc-lavender' : ''}" href="javascript:void(0)" onclick="${q.act}">
       <span class="qc-icon">${q.icon}</span>
       <div class="qc-text">
         <div class="qc-label">${q.label}</div>
@@ -164,7 +394,7 @@ UI.renderHome = () => {
     </a>`
   ).join('');
 
-  // ── 区域4a：花姐今天重点盯这三件（简化版：只显事实项名称）──
+  // ── 区域4a：花姐今天重点盯这几件（简化版：只显事实项名称）──
   const focusItemsHTML = focusItems.length ? focusItems.map((f, idx) => {
     const num = ['①','②','③'][idx] || (idx + 1) + '.';
     const dot = f.tagLevel === 'danger'
@@ -178,12 +408,12 @@ UI.renderHome = () => {
   }).join('') : `
     <div class="fc-empty">
       <div class="fc-empty-icon">✨</div>
-      <div class="fc-empty-text">今天没有特别需要盯的事项</div>
+      <div class="fc-empty-text">今天没有特别需要盯的事项。</div>
     </div>`;
 
   const focusHTML = `<div class="fc-card">
     <div class="fc-card-head">
-      <div class="fc-title"><span class="fc-title-icon">👀</span> 花姐今天重点盯这三件</div>
+      <div class="fc-title"><span class="fc-title-icon">👀</span> 花姐今天重点盯这几件</div>
       ${focusItems.length ? `<span class="badge wait">${focusItems.length}件</span>` : '<span class="badge ok">✓</span>'}
     </div>
     <div class="fc-body">${focusItemsHTML}</div>
@@ -401,7 +631,7 @@ UI.leaveTodayDetail = () => {
     : '<div class="fc-empty"><div class="fc-empty-icon">🙂</div><div class="fc-empty-text">今日无休假安排，工程师均在岗</div></div>';
 
   UI.modal('今日休假详情', body, `<button class="btn" data-close>关闭</button>`, {
-    onMount(root) { root.querySelector('[data-close]').onclick = () => UI.modalClose(); },
+    onMount() {},
   });
 };
 
@@ -429,13 +659,38 @@ UI.renderDispatch = (filterArg) => {
   const f = NK.dispatchFilter;
   const today = NK.today();
   let list = [...NK.db.dispatches].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  if (f.status && f.status !== '全部') list = list.filter(d => d.status === f.status);
+  // 默认"全部"不包含已删除记录；仅在"已删除"筛选中显示回收站内容
+  const showDeleted = f.status === '已删除';
+  list = list.filter(d => (d.recordStatus === '已删除') === showDeleted);
+  if (f.status && f.status !== '全部' && f.status !== '已删除') list = list.filter(d => d.status === f.status);
   if (f.priority && f.priority !== '全部') list = list.filter(d => d.priority === f.priority);
   if (f.q) list = list.filter(d => `${d.no} ${d.title} ${d.city} ${d.engineer} ${d.contactName}`.includes(f.q));
   if (f.overdue) list = list.filter(d => d.planDone && d.planDone < today && d.status !== '已闭环' && d.status !== '已取消');
+  // 上门日期筛选：默认按上门日期(visitDate)查询
+  if (f.visitDate) list = list.filter(d => d.visitDate === f.visitDate);
+  if (f.visitNoDate) list = list.filter(d => !d.visitDate);
 
-  const statusOpts = ['全部', ...NK.DISPATCH_STATUS, '已取消', '已暂停'];
+  const statusOpts = ['全部', '已删除', ...NK.DISPATCH_STATUS, '已取消', '已暂停', '已撤销'];
   const priOpts = ['全部', 'P1', 'P2', 'P3'];
+
+  // 上门日期显示标签：今天· / 明天· 需保留具体日期；无日期显示「未填写」
+  const visitLabel = (d) => {
+    if (!d.visitDate) return '<span style="color:var(--text-3)">未填写</span>';
+    if (d.visitDate === today) return `今天 · ${d.visitDate}`;
+    const tm = (() => { const x = new Date(); x.setDate(x.getDate() + 1); return NK.fmtDate(x); })();
+    if (d.visitDate === tm) return `明天 · ${d.visitDate}`;
+    return d.visitDate;
+  };
+
+  // 快捷日期范围：今天 / 明天 / 本周 / 全部
+  // 快捷日期范围：今天 / 明天 / 全部
+  const visitDateShortcuts = [
+    ['全部', ''],
+    ['今天', today],
+    ['明天', (() => { const x = new Date(); x.setDate(x.getDate() + 1); return NK.fmtDate(x); })()],
+  ];
+  const _shortcutHTML = visitDateShortcuts.map(([label, val]) =>
+    `<button class="fb-chip ${f.visitDate === val ? 'on' : ''}" data-vs="${val}" onclick="UI.setDispatchVisit('${val}')">${label}</button>`).join('');
 
   el.innerHTML = UI.pageHead('派单中心', '全国派单 · 任务闭环 · 一次录入多处复用',
     `<button class="btn btn-accent" onclick="UI.dispatchCreate()">⇶ 新建派单</button>`) +
@@ -443,31 +698,56 @@ UI.renderDispatch = (filterArg) => {
       <input class="fb-input" id="dpQ" placeholder="搜索编号/标题/城市/工程师…" value="${NK.esc(f.q || '')}">
       <select class="fb-select" id="dpStatus">${statusOpts.map(s => `<option ${(f.status || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
       <select class="fb-select" id="dpPri">${priOpts.map(s => `<option ${(f.priority || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <input type="date" class="fb-date" id="dpVisitDate" value="${f.visitDate || ''}" title="按上门日期查询">
+      <span class="fb-chips">${_shortcutHTML}</span>
+      ${f.visitDate ? `<button class="fb-clear" id="dpVisitClear" title="清除日期">清除日期</button>` : ''}
+      <select class="fb-select" id="dpVisitNoDate" ${f.visitNoDate ? 'disabled' : ''}>
+        <option value="">全部日期</option>
+        <option value="1" ${f.visitNoDate ? 'selected' : ''}>上门日期未填写</option>
+      </select>
       <label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="checkbox" id="dpOverdue" ${f.overdue ? 'checked' : ''}>只看超时</label>
       <span class="spacer"></span>
       <span style="font-size:12px;color:var(--text-3)">共 ${list.length} 条</span>
     </div>
     <div class="card"><div class="table-wrap"><table class="tbl">
-      <thead><tr><th>派单编号</th><th>事项</th><th>职场</th><th>工程师</th><th>优先级</th><th>状态</th><th>计划完成</th><th>等待时长</th><th>操作</th></tr></thead>
+      <thead><tr><th>派单编号</th><th>事项</th><th>职场</th><th>工程师</th><th>上门日期</th><th>状态</th><th>操作</th></tr></thead>
       <tbody>${list.length ? list.map(d => {
         const disp = NK.v.dispatch(d);
-        return `<tr>
+        const inactive = NK.dispatchInactive(d) || d.recordStatus === '已删除';
+        const rowDim = inactive ? ' style="opacity:.62;filter:grayscale(.4)"' : '';
+        // 操作按钮：详情始终；催办仅正常待发送；更多菜单（撤销/删除）仅未撤销未删除记录；已撤销可恢复；回收站内可恢复/永久删除
+        let ops = `<button class="btn btn-sm" onclick="UI.dispatchDetail('${d.id}')">详情</button>`;
+        if (d.status === '已生成' && !inactive) {
+          ops += `<button class="btn btn-sm btn-warn" onclick="UI.dispatchUrgent('${d.id}')">催办</button>`;
+        }
+        if (d.status === '待花姐验收' && !inactive) {
+          ops += `<button class="btn btn-sm btn-accent" onclick="UI.dispatchAccept('${d.id}')">验收</button>`;
+        }
+        if (d.recordStatus === '已删除') {
+          ops += `<button class="btn btn-sm" onclick="UI.dispatchRestore('${d.id}')">恢复</button>`;
+          ops += `<button class="btn btn-sm btn-danger" onclick="UI.dispatchPurge('${d.id}')">永久删除</button>`;
+        } else if (d.status === '已撤销') {
+          ops += `<button class="btn btn-sm" onclick="UI.dispatchUnrevoke('${d.id}')">恢复派单</button>`;
+        } else {
+          ops += `<span style="position:relative">
+            <button class="btn btn-sm" data-more="${d.id}">更多 ▾</button>
+            <span class="dm-menu" id="dmMenu${d.id}" style="display:none;position:absolute;right:0;top:100%;z-index:30;background:var(--bg-card,#fff);border:1px solid var(--line,#e5e5e5);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);padding:4px;min-width:110px">
+              <button class="dm-item" style="display:block;width:100%;text-align:left;background:none;border:none;padding:7px 10px;cursor:pointer;font-size:12px;border-radius:6px" onclick="UI.dispatchRevoke('${d.id}')">撤销派单</button>
+              <button class="dm-item" style="display:block;width:100%;text-align:left;background:none;border:none;padding:7px 10px;cursor:pointer;font-size:12px;border-radius:6px;color:var(--danger,#d93025)" onclick="UI.dispatchDelete('${d.id}')">删除记录</button>
+            </span>
+          </span>`;
+        }
+        return `<tr${rowDim}>
           <td class="num">${d.no}</td>
-          <td style="max-width:240px"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${NK.esc(d.title)}</div>
-            <div style="color:var(--text-3);font-size:11px">${NK.esc((d.desc || '').slice(0, 30))}</div></td>
+          <td style="max-width:260px"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${NK.esc(d.title)}</div>
+            <div style="color:var(--text-3);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${NK.esc((d.desc || '').slice(0, 40))}</div></td>
           <td>${NK.esc(disp.siteName || d.city)}</td>
           <td>${NK.esc(disp.engineer || '—')}</td>
-          <td>${UI.priBadge(d.priority)}</td>
-          <td>${UI.statusBadge(d.status)}${d.urgentCount ? `<div style="font-size:10px;color:var(--warn)">已催${d.urgentCount}次</div>` : ''}</td>
-          <td>${d.planDone ? d.planDone : '—'}</td>
-          <td>${d.status !== '已闭环' ? NK.waitText(d.createdAt) : '—'}</td>
-          <td style="white-space:nowrap">
-            <button class="btn btn-sm" onclick="UI.dispatchDetail('${d.id}')">详情</button>
-            ${d.status === '已生成' ? `<button class="btn btn-sm btn-warn" onclick="UI.dispatchUrgent('${d.id}')">催办</button>` : ''}
-            ${d.status === '待花姐验收' ? `<button class="btn btn-sm btn-accent" onclick="UI.dispatchAccept('${d.id}')">验收</button>` : ''}
-          </td>
+          <td style="white-space:nowrap">${visitLabel(d)}</td>
+          <td>${UI.statusBadge(d.status)}${d.urgentCount ? `<div style="font-size:10px;color:var(--warn)">已催${d.urgentCount}次</div>` : ''}${d.revokeReason ? `<div style="font-size:10px;color:var(--text-3)">撤销原因：${NK.esc(d.revokeReason)}</div>` : ''}</td>
+          <td style="white-space:nowrap">${ops}</td>
         </tr>`;
-      }).join('') : UI.empty('暂无派单，点击右上角「新建派单」开始', 9)}</tbody>
+      }).join('') : UI.empty(showDeleted ? '回收站为空，暂无已删除派单' : '暂无派单，点击右上角「新建派单」开始', 7)}</tbody>
     </table></div></div>`;
 
   const bind = () => {
@@ -476,6 +756,8 @@ UI.renderDispatch = (filterArg) => {
         q: document.getElementById('dpQ').value,
         status: document.getElementById('dpStatus').value,
         priority: document.getElementById('dpPri').value,
+        visitDate: document.getElementById('dpVisitDate').value,
+        visitNoDate: document.getElementById('dpVisitNoDate').value === '1',
         overdue: document.getElementById('dpOverdue').checked,
       };
       UI.renderDispatch();
@@ -483,9 +765,41 @@ UI.renderDispatch = (filterArg) => {
     document.getElementById('dpQ').addEventListener('input', NK.debounce ? NK.debounce(onFilter, 300) : onFilter);
     document.getElementById('dpStatus').onchange = onFilter;
     document.getElementById('dpPri').onchange = onFilter;
+    document.getElementById('dpVisitDate').onchange = onFilter;
+    document.getElementById('dpVisitNoDate').onchange = onFilter;
     document.getElementById('dpOverdue').onchange = onFilter;
+    const clearBtn = document.getElementById('dpVisitClear');
+    if (clearBtn) clearBtn.onclick = () => {
+      document.getElementById('dpVisitDate').value = '';
+      document.getElementById('dpVisitNoDate').value = '';
+      onFilter();
+    };
+    // 更多菜单：点击展开/收起
+    el.querySelectorAll('[data-more]').forEach(btn => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const m = document.getElementById('dmMenu' + btn.getAttribute('data-more'));
+        const all = el.querySelectorAll('.dm-menu');
+        all.forEach(x => { if (x !== m) x.style.display = 'none'; });
+        m.style.display = m.style.display === 'none' ? 'block' : 'none';
+      };
+    });
+    // 点击其他区域关闭更多菜单
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest || !e.target.closest('[data-more], .dm-menu')) {
+        el.querySelectorAll('.dm-menu').forEach(x => x.style.display = 'none');
+      }
+    }, { once: false });
   };
   setTimeout(bind, 0);
+};
+
+/** 派单中心：上门日期快捷筛选（今天/明天/全部） */
+UI.setDispatchVisit = (date) => {
+  NK.dispatchFilter = NK.dispatchFilter || {};
+  NK.dispatchFilter.visitDate = date || '';
+  if (date) NK.dispatchFilter.visitNoDate = false;
+  UI.renderDispatch();
 };
 
 /* ============================================================
@@ -521,8 +835,14 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
         <div class="dp-hint">输入自然语言即可，无需填写标题</div>
       </div>
       <div class="dp-field">
-        <label class="dp-label">上门时间 <span style="color:var(--text-3);font-weight:400;font-size:11px">选填，方便排入时间轴</span></label>
-        <input type="date" id="dpArriveDate" class="dp-input dp-date-input" style="color:var(--text)">
+        <label class="dp-label">上门日期 <span style="color:var(--text-3);font-weight:400;font-size:11px">选填，快捷选择即可</span></label>
+        <div class="dp-visit-row">
+          <button type="button" class="dp-visit-btn" data-vd="today">今天</button>
+          <button type="button" class="dp-visit-btn dp-visit-active" data-vd="tomorrow">明天</button>
+          <input type="date" id="dpVisitDate" class="dp-input dp-date-input" style="color:var(--text);width:auto;flex:1;min-width:120px">
+          <button type="button" class="dp-visit-btn dp-visit-none" data-vd="none">暂不确定</button>
+        </div>
+        <div class="dp-hint">默认建议「明天」，也可指定日期；选择「暂不确定」仍可正常创建派单，上门日期显示「未填写」</div>
       </div>
       <div class="dp-submit-row">
         <button class="btn" data-close>取消</button>
@@ -545,12 +865,24 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
       </div>
     </div>`;
 
+  // 未保存内容判断：供 onBeforeClose 使用（成功页不拦截）
+  const modalState = { edited: false };
+  const isEdited = () => modalState.edited;
+
   UI.modal('新建派单', body, '', {
     size: 'modal-dispatch',
+    onBeforeClose(close, reason) {
+      // 编辑视图且已输入内容 → 走未保存确认
+      if (reason !== 'save' && isEdited()) {
+        UI.confirmDiscard('当前派单还没有生成，确定放弃吗？');
+        return; // 不直接关闭，等待用户选择
+      }
+      close();
+    },
     onMount(root) {
       const searchInput  = root.querySelector('#dpSiteSearch');
       const descInput   = root.querySelector('#dpDesc');
-      const arriveInput = root.querySelector('#dpArriveDate');
+      const visitInput  = root.querySelector('#dpVisitDate');
       const submitBtn   = root.querySelector('#dpSubmitBtn');
       const hint        = root.querySelector('#dpHint');
       const candidates  = root.querySelector('#dpCandidates');
@@ -573,6 +905,7 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
 
       const pickSite = (s) => {
         pickedSite = s;
+        modalState.edited = true;
         addRecent(s);
         searchInput.value = NK.v.siteName(s.name);
 
@@ -689,9 +1022,41 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
       });
 
       const checkSubmit = () => {
+        if (descInput.value.trim()) modalState.edited = true;
         submitBtn.disabled = !(pickedSite && descInput.value.trim());
       };
       descInput.addEventListener('input', checkSubmit);
+      visitInput.addEventListener('input', () => { if (visitInput.value) modalState.edited = true; });
+
+      // 上门日期快捷选择：今天/明天/选择日期/暂不确定（默认明天）
+      const visitBtns = root.querySelectorAll('.dp-visit-btn');
+      const todayV = NK.today();
+      const tomorrowV = (() => { const d = new Date(); d.setDate(d.getDate() + 1); return NK.fmtDate ? NK.fmtDate(d) : NK.today(); })();
+      const applyVisitActive = () => {
+        visitBtns.forEach(b => {
+          const vd = b.dataset.vd;
+          const active = (vd === 'today' && visitInput.value === todayV) ||
+                         (vd === 'tomorrow' && visitInput.value === tomorrowV) ||
+                         (vd === 'none' && !visitInput.value);
+          b.classList.toggle('dp-visit-active', active);
+        });
+      };
+      // 默认建议「明天」：仅在花姐尚未自行选择时预置（可改/可清）
+      if (!visitInput.value) {
+        visitInput.value = tomorrowV;
+      }
+      visitBtns.forEach(btn => {
+        btn.onclick = () => {
+          const vd = btn.dataset.vd;
+          if (vd === 'today') visitInput.value = todayV;
+          else if (vd === 'tomorrow') visitInput.value = tomorrowV;
+          else if (vd === 'none') visitInput.value = '';
+          modalState.edited = true;
+          applyVisitActive();
+        };
+      });
+      visitInput.addEventListener('change', applyVisitActive);
+      applyVisitActive();
 
       descInput.addEventListener('keydown', (e) => {
         if (e.ctrlKey && e.key === 'Enter' && !submitBtn.disabled) {
@@ -717,7 +1082,7 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
           siteId: pickedSite.id,
           type: '故障',
           source: '花姐手动创建',
-          planArrive: arriveInput.value,
+          visitDate: visitInput.value,
         });
 
         // 补位派单：派单创建成功后关联休假记录，更新补位状态为"已创建派单"
@@ -738,6 +1103,7 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
         }
 
         wrap.classList.add('hidden');
+        modalState.edited = false; // 已保存，成功页关闭不拦截
         root.querySelector('#dpSuccessTitle').textContent =
           `花姐，${NK.v.siteName(pickedSite.name)}的派单已经生成 ✓`;
         root.querySelector('#dpSuccessSub').textContent =
@@ -761,7 +1127,7 @@ UI.dispatchCreate = (siteId, prefillOpts) => {
         };
       };
 
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
 
       // 补位派单：若传入了 siteId，自动选中该职场并预填
       if (siteId) {
@@ -800,6 +1166,22 @@ UI.dispatchDetail = (id) => {
     ['总闭环时长', d.doneAt && d.createdAt ? NK.humanDur(new Date(d.doneAt) - new Date(d.createdAt)) : '—'],
   ];
 
+  // 上门日期编辑控件（可补充/修改，保存后列表与搜索立即生效）
+  const visitNow = d.visitDate || '';
+  const visitEdit = `
+    <div class="dg-item" style="margin-bottom:8px">
+      <span class="dg-label">上门日期</span>
+      <span class="dg-val" id="ddVisitVal">${visitNow ? NK.esc(visitNow) : '<span style="color:var(--text-3)">未填写</span>'}</span>
+      <button class="btn btn-sm" id="ddVisitEdit" style="margin-left:4px">${visitNow ? '修改' : '补充上门日期'}</button>
+    </div>
+    <div id="ddVisitEditBox" style="display:none;margin-bottom:8px">
+      <input type="date" id="ddVisitInput" class="dp-input dp-date-input" style="width:auto" value="${visitNow}">
+      <button class="btn btn-sm btn-accent" id="ddVisitSave">保存</button>
+      <button class="btn btn-sm" id="ddVisitCancel">取消</button>
+      <button class="btn btn-sm btn-ghost" id="ddVisitClear">设为未填写</button>
+    </div>
+    ${d.visitDateHistory && d.visitDateHistory.length ? `<div style="margin-top:4px;font-size:11px;color:var(--text-3)">修改历史：${d.visitDateHistory.map(h => `${h.from} → ${h.to}（${NK.fmtDT(new Date(h.at))}）`).join('；')}</div>` : ''}`;
+
   const body = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
       <span class="num" style="font-weight:700;font-size:14px">${d.no}</span>
@@ -817,6 +1199,9 @@ UI.dispatchDetail = (id) => {
           <div class="dg-item"><span class="dg-label">工程师</span><span class="dg-val">${NK.esc(disp.engineer || '—')}</span></div>
           <div class="dg-item"><span class="dg-label">工单号</span><span class="dg-val">${NK.esc(d.workNo || '—')}</span></div>
         </div>
+      </div></div>
+      <div class="card"><div class="card-head"><div class="card-title">上门日期</div></div><div class="card-body">
+        ${visitEdit}
       </div></div>
       <div class="card"><div class="card-head"><div class="card-title">时间记录</div></div><div class="card-body">
         ${timings.map(([k, v]) => `<div class="dg-item" style="margin-bottom:6px"><span class="dg-label">${k}</span><span class="dg-val">${v}</span></div>`).join('')}
@@ -849,7 +1234,7 @@ UI.dispatchDetail = (id) => {
   UI.modal(`派单详情`, body, foot, {
     size: 'modal-lg',
     onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
       const b1 = root.querySelector('#ddFeedback');
       if (b1) b1.onclick = () => UI.dispatchFeedback(d.id);
       const b2 = root.querySelector('#ddUrgent');
@@ -860,6 +1245,43 @@ UI.dispatchDetail = (id) => {
       if (b4) b4.onclick = () => UI.dispatchClose(d.id);
       const b5 = root.querySelector('#ddCopyMsg');
       if (b5) b5.onclick = () => UI.copy(d.msg);
+
+      // 上门日期补充/修改
+      const visitEditBtn = root.querySelector('#ddVisitEdit');
+      const visitBox = root.querySelector('#ddVisitEditBox');
+      const visitVal = root.querySelector('#ddVisitVal');
+      const visitInput = root.querySelector('#ddVisitInput');
+      const refreshVisitVal = () => {
+        const cur = NK.getDispatch(d.id);
+        const v = cur ? cur.visitDate : d.visitDate;
+        if (visitVal) visitVal.innerHTML = v ? NK.esc(v) : '<span style="color:var(--text-3)">未填写</span>';
+        if (visitEditBtn) visitEditBtn.textContent = v ? '修改' : '补充上门日期';
+      };
+      if (visitEditBtn) visitEditBtn.onclick = () => { if (visitBox) visitBox.style.display = 'flex'; };
+      if (visitInput && root.querySelector('#ddVisitSave')) {
+        root.querySelector('#ddVisitSave').onclick = () => {
+          const v = visitInput.value;
+          if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) { UI.toast('花姐，日期格式不正确', 'warn'); return; }
+          NK.setVisitDate(d.id, v);
+          refreshVisitVal();
+          if (visitBox) visitBox.style.display = 'none';
+          UI.toast('花姐，上门日期已更新 ✨', 'ok');
+          UI.renderDispatch();
+          UI.renderHome && UI.renderHome();
+        };
+      }
+      if (visitInput && root.querySelector('#ddVisitClear')) {
+        root.querySelector('#ddVisitClear').onclick = () => {
+          NK.setVisitDate(d.id, '');
+          refreshVisitVal();
+          if (visitBox) visitBox.style.display = 'none';
+          UI.toast('花姐，已设为「未填写」', 'ok');
+          UI.renderDispatch();
+        };
+      }
+      if (root.querySelector('#ddVisitCancel')) {
+        root.querySelector('#ddVisitCancel').onclick = () => { if (visitBox) visitBox.style.display = 'none'; };
+      }
     },
   });
 };
@@ -894,8 +1316,9 @@ UI.dispatchFeedback = (id) => {
       <input type="datetime-local" id="fbNextTime" style="display:none;margin-top:6px;width:100%;box-sizing:border-box;font-size:13px">
     </div>`;
   UI.modal('记录进展', body, `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="fbOk">保存</button>`, {
+    editable: true,
     onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
       // 快速状态按钮
       root.querySelectorAll('.qs-btn[data-qs]').forEach(btn => {
         btn.onclick = () => {
@@ -963,7 +1386,7 @@ UI.dispatchUrgent = (id) => {
     <p style="margin-top:8px;font-size:11px;color:var(--text-3)">复制后发到微信或 Teams，花姐发出去后我会记住这次催办时间。</p>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-warn" id="urOk">复制并记录</button>`, {
     onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
       root.querySelector('#urOk').onclick = async () => {
         await UI.copy(msg);
         NK.save();
@@ -988,7 +1411,7 @@ UI.dispatchAccept = (id) => {
     </div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="acOk">确认验收</button>`, {
     onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
       root.querySelector('#acOk').onclick = () => {
         const pass = root.querySelector('#acResult').value.includes('通过');
         const note = root.querySelector('#acNote').value;
@@ -1022,7 +1445,7 @@ UI.dispatchClose = (id) => {
     </div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-success" id="clOk">确认闭环</button>`, {
     onMount(root) {
-      root.querySelector('[data-close]').onclick = () => UI.modalClose();
+      // [close] 已由统一弹窗机制绑定
       root.querySelector('#clOk').onclick = () => {
         const note = root.querySelector('#clNote').value.trim();
         NK.updateDispatchFeedback(d, {
@@ -1040,8 +1463,164 @@ UI.dispatchClose = (id) => {
   });
 };
 
-/** 验收入口（从首页/列表） */
-UI.acceptOpen = (id) => {
+/* ============================================================
+   派单撤销 / 删除 / 回收站 / 恢复
+   ============================================================ */
+
+/** 撤销派单：展示摘要 + 撤销原因快捷选项 + 关联任务/休假补位提示 */
+UI.dispatchRevoke = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  const disp = NK.v.dispatch(d);
+  const t = NK.getTask(d.taskId);
+  const leave = NK.db.leaves.find(l => l.relatedDispatchId === d.id);
+  const REASONS = ['用户取消上门', '已远程解决', '需求取消', '重复派单', '计划调整', '其他'];
+  const hasTask = !!t && t.status !== '已取消';
+  const body = `
+    <p style="font-weight:600;margin-bottom:10px">确定撤销这条派单吗？</p>
+    <div class="detail-grid" style="grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+      <div class="dg-item"><span class="dg-label">派单编号</span><span class="dg-val">${d.no}</span></div>
+      <div class="dg-item"><span class="dg-label">事项名称</span><span class="dg-val">${NK.esc(disp.title)}</span></div>
+      <div class="dg-item"><span class="dg-label">职场</span><span class="dg-val">${NK.esc(disp.siteName || d.city || '—')}</span></div>
+      <div class="dg-item"><span class="dg-label">当前工程师</span><span class="dg-val">${NK.esc(disp.engineer || '—')}</span></div>
+    </div>
+    <div class="form-item"><label>撤销原因</label>
+      <div class="qs-grid" style="grid-template-columns:repeat(3,1fr);gap:6px">${REASONS.map(r => `<button class="qs-btn" data-reason="${r}">${r}</button>`).join('')}</div>
+      <input id="rvReason" placeholder="补充说明（可选）" style="margin-top:8px;width:100%;box-sizing:border-box" >
+    </div>
+    ${hasTask ? `<div style="margin-top:12px;padding:10px;background:var(--bg-warn,rgba(255,200,0,.08));border-radius:8px;font-size:12px">
+      <div style="margin-bottom:6px">该派单关联了一条任务（${t.no} ${NK.esc(t.name)}），是否同时取消关联任务？</div>
+      <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="rvCancelTask" checked> <b>同时取消关联任务（推荐）</b></label>
+      <div style="color:var(--text-3);font-size:11px;margin-top:4px">若任务还有其他用途，可取消勾选，只撤销派单保留任务。</div>
+    </div>` : ''}
+    ${leave ? `<div style="margin-top:12px;padding:10px;background:var(--bg-warn,rgba(255,200,0,.08));border-radius:8px;font-size:12px">
+      ⚠️ 该派单关联工程师休假补位。撤销后，休假记录将重新显示为"补位待安排"。
+    </div>` : ''}
+    <p style="margin-top:12px;font-size:11px;color:var(--text-3)">撤销后不会删除派单记录，但该派单将停止催办、超时提醒和后续跟进。</p>`;
+  UI.modal('撤销派单', body, `<button class="btn" data-close>返回</button><button class="btn btn-warn" id="rvOk">确认撤销</button>`, {
+    onMount(root) {
+      // [close] 已由统一弹窗机制绑定
+      let picked = '';
+      root.querySelectorAll('[data-reason]').forEach(b => {
+        b.onclick = () => {
+          root.querySelectorAll('[data-reason]').forEach(x => x.classList.remove('qs-active'));
+          b.classList.add('qs-active');
+          picked = b.getAttribute('data-reason');
+        };
+      });
+      root.querySelector('#rvOk').onclick = () => {
+        const reason = picked || (root.querySelector('#rvReason').value.trim() || '其他');
+        const cancelTask = hasTask ? !!root.querySelector('#rvCancelTask').checked : false;
+        const res = NK.revokeDispatch(d.id, { reason, cancelTask });
+        if (!res.ok) { UI.toast(res.msg, 'err'); return; }
+        if (res.leaveLinked) UI.toast('花姐，补位派单已撤销，休假记录已经重新标记为"补位待安排"。');
+        else UI.toast(res.msg);
+        UI.modalClose();
+        UI.renderHome();
+        UI.refreshBadges();
+        UI.renderDispatch();
+      };
+    },
+  });
+};
+
+/** 删除记录：已处理派单引导撤销；允许删除的走确认 */
+UI.dispatchDelete = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  // 纯状态判断是否已产生处理记录（只引导，不真正删除，避免取消时误删）
+  const processed = ['已发送', '跟进中', '处理中', '等待外部条件', '已处理', '待花姐验收', '已闭环'];
+  if (processed.includes(d.status)) {
+    // 已产生处理记录 → 引导撤销
+    UI.modal('删除记录', `
+      <p style="font-weight:600">这条派单已经产生处理记录</p>
+      <p style="margin-top:8px;font-size:13px;color:var(--text-2)">该派单已经产生处理记录，建议使用"撤销派单"保留过程留痕。</p>
+      <p style="margin-top:8px;font-size:12px;color:var(--text-3)">撤销会保留派单的创建、发送、跟进等历史记录，适合"业务取消"场景；错误且未发送的记录才建议删除进回收站。</p>`,
+      `<button class="btn" data-close>返回</button><button class="btn btn-warn" id="blToRevoke">改为撤销派单</button>`, {
+      onMount(root) {
+        root.querySelector('#blToRevoke').onclick = () => {
+          UI.modalClose();
+          UI.dispatchRevoke(d.id);
+        };
+      },
+    });
+    return;
+  }
+  const disp = NK.v.dispatch(d);
+  const body = `
+    <p style="font-weight:600;margin-bottom:10px">确定删除这条错误派单吗？</p>
+    <div class="detail-grid" style="grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+      <div class="dg-item"><span class="dg-label">派单编号</span><span class="dg-val">${d.no}</span></div>
+      <div class="dg-item"><span class="dg-label">事项</span><span class="dg-val">${NK.esc(disp.title)}</span></div>
+      <div class="dg-item"><span class="dg-label">职场</span><span class="dg-val">${NK.esc(disp.siteName || d.city || '—')}</span></div>
+    </div>
+    <div class="form-item"><label>删除原因</label>
+      <div class="qs-grid" style="grid-template-columns:repeat(3,1fr);gap:6px">${['录入错误', '重复创建', '测试数据', '其他'].map(r => `<button class="qs-btn" data-delreason="${r}">${r}</button>`).join('')}</div>
+      <input id="delReason" placeholder="补充说明（可选）" style="margin-top:8px;width:100%;box-sizing:border-box">
+    </div>
+    <p style="margin-top:12px;font-size:11px;color:var(--text-3)">删除后将从正常派单列表中移除，但会暂时保留在回收站中，可随时恢复。</p>`;
+  UI.modal('删除记录', body, `<button class="btn" data-close>取消</button><button class="btn btn-danger" id="delOk">删除记录</button>`, {
+    onMount(root) {
+      let picked = '';
+      root.querySelectorAll('[data-delreason]').forEach(b => {
+        b.onclick = () => {
+          root.querySelectorAll('[data-delreason]').forEach(x => x.classList.remove('qs-active'));
+          b.classList.add('qs-active');
+          picked = b.getAttribute('data-delreason');
+        };
+      });
+      root.querySelector('#delOk').onclick = () => {
+        const reason = picked || (root.querySelector('#delReason').value.trim() || '录入错误');
+        const r2 = NK.softDeleteDispatch(d.id, { reason });
+        if (!r2.ok) { UI.toast(r2.msg, 'err'); return; }
+        UI.toast(r2.msg);
+        UI.modalClose();
+        UI.renderHome();
+        UI.refreshBadges();
+        UI.renderDispatch();
+      };
+    },
+  });
+};
+
+/** 恢复已删除派单（回收站 → 正常列表） */
+UI.dispatchRestore = (id) => {
+  const res = NK.restoreDispatch(id);
+  if (!res.ok) { UI.toast(res.msg, 'err'); return; }
+  UI.toast(res.msg);
+  UI.renderHome();
+  UI.refreshBadges();
+  UI.renderDispatch();
+};
+
+/** 永久删除（回收站内，二次确认） */
+UI.dispatchPurge = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  UI.confirm(`永久删除后无法恢复，是否继续？\n（${d.no} ${d.title} 将从系统彻底移除，仅保留此提示）`, () => {
+    NK.purgeDispatch(id);
+    UI.toast('花姐，这条记录已永久删除。');
+    UI.renderHome();
+    UI.refreshBadges();
+    UI.renderDispatch();
+  }, '永久删除', { danger: true });
+};
+
+/** 恢复已撤销派单（重新进入待跟进） */
+UI.dispatchUnrevoke = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  UI.confirm(`恢复后该派单将重新进入待跟进流程。\n（${d.no} ${d.title}）确认恢复吗？`, () => {
+    const res = NK.unrevokeDispatch(id);
+    if (!res.ok) { UI.toast(res.msg, 'err'); return; }
+    UI.toast(res.msg);
+    UI.renderHome();
+    UI.refreshBadges();
+    UI.renderDispatch();
+  }, '恢复派单');
+};
+
+/** 验收入口（从首页/列表） */UI.acceptOpen = (id) => {
   const d = NK.getDispatch(id);
   if (d) { UI.dispatchDetail(id); return; }
   const t = NK.getTask(id);
@@ -1201,7 +1780,7 @@ UI.renderTasks = () => {
   const typeOpts = ['全部', ...NK.TASK_TYPES];
   const srcOpts = ['全部', '系统固定任务', '花姐手动新增', '安全告警', '派单自动关联', '专项任务', '已完成'];
   el.innerHTML = UI.pageHead('任务与告警', '任务闭环 · 告警驱动 · 固定任务每日/月度自动生成',
-    `<button class="btn btn-accent" onclick="UI.taskCreate()">✚ 新建任务</button>`) +
+    `<button class="btn" onclick="UI.triggerFixed('TPL005')">🖨️ 收到耗材提醒</button><button class="btn btn-accent" onclick="UI.taskCreate()">✚ 新建任务</button>`) +
     `<div class="filter-bar">
       <input class="fb-input" id="tkQ" placeholder="搜索编号/名称/职场/工程师…" value="${NK.esc(f.q || '')}">
       <select class="fb-select" id="tkStatus">${statusOpts.map(s => `<option ${(f.status || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
@@ -1293,7 +1872,7 @@ UI.alertClearStart = () => {
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="alClearOk">确认清空</button>`, {
       size: 'modal-sm',
       onMount(root) {
-        root.querySelector('[data-close]').onclick = () => UI.modalClose();
+        // [close] 已由统一弹窗机制绑定
         root.querySelector('#alClearOk').onclick = () => UI.alertClearDo('all');
       },
     });
@@ -1333,7 +1912,7 @@ UI.alertRecordsOpen = () => {
       }).join('')
     : `<div class="tbl-empty" style="padding:24px">暂无清空记录。清空告警后，这里会保留每次清空的留痕。</div>`;
   UI.modal('清空记录', `<div class="al-records">${body}</div>`,
-    `<button class="btn" data-close>关闭</button>`, { size: 'modal', onMount(r) { r.querySelector('[data-close]').onclick = () => UI.modalClose(); } });
+    `<button class="btn" data-close>关闭</button>`, { size: 'modal' });
 };
 
 /** 打开「冷却时间设置」弹窗 */
@@ -1353,7 +1932,7 @@ UI.alertCooldownOpen = () => {
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="alCoolOk">保存</button>`, {
       size: 'modal-sm',
       onMount(root) {
-        root.querySelector('[data-close]').onclick = () => UI.modalClose();
+        // [close] 已由统一弹窗机制绑定
         root.querySelector('#alCoolOk').onclick = () => {
           const v = Math.max(0, Math.min(168, parseInt(document.getElementById('alCool').value || '2', 10) || 0));
           state.cooldownHours = v;
@@ -1395,6 +1974,7 @@ UI.taskCreate = (updateMode) => {
     </div>
     <div class="form-item"><label>处理要求 / 下一步</label><textarea id="tcNext" placeholder="任务要求、验收标准等"></textarea></div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="tcOk">创建任务</button>`, {
+    editable: true,
     onMount(root) {
       const siteQ = root.querySelector('#tcSiteQ');
       const siteList = root.querySelector('#tcSiteList');
@@ -1459,9 +2039,18 @@ UI.quickNote = () => {
       </div>
       <textarea id="qnContent" class="qn-content" placeholder="会议内容、电话记录、临时安排、工作想法……先记下来再说。">${draft && draft.content ? NK.esc(draft.content) : ''}</textarea>
     </div>`,
-    `<button class="btn" onclick="UI.modalClose()">取消</button><button class="btn btn-accent" id="qnSave">保存记录</button>`,
+    `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="qnSave">保存记录</button>`,
     {
       size: 'modal-note',
+      onBeforeClose(close, reason) {
+        // 快速记录已有自动草稿能力：关闭时若仍有未保存输入，自动落草稿（不重复创建）
+        try {
+          const t = document.getElementById('qnTitle').value;
+          const c = document.getElementById('qnContent').value;
+          if (t || c) NK.saveDraft({ title: t, content: c });
+        } catch (e) { /* 草稿保存失败则静默，交由普通关闭 */ }
+        close();
+      },
       onMount(root) {
         // 自动草稿保存：停止输入2秒后
         let timer;
@@ -1489,15 +2078,6 @@ UI.quickNote = () => {
         document.getElementById('qnTitle').addEventListener('keydown', onKey);
         // 保存
         document.getElementById('qnSave').onclick = UI.quickNoteSave;
-        // 关闭时检查草稿
-        root.querySelector('[data-close]').addEventListener('click', () => {
-          clearTimeout(timer);
-          const t = document.getElementById('qnTitle').value;
-          const c = document.getElementById('qnContent').value;
-          if (t || c) {
-            NK.saveDraft({ title: t, content: c });
-          }
-        });
       }
     }
   );
@@ -1775,7 +2355,7 @@ UI.notesEdit = (id) => {
     <div class="qn-toolbar"><button class="qn-tpl-btn" onclick="UI.quickNoteInsertTpl()">📋 插入会议纪要模板</button></div>
     <textarea id="qnContent" class="qn-content" placeholder="会议内容、电话记录、临时安排、工作想法……先记下来再说。">${NK.esc(n.content)}</textarea>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="qnSave">保存</button>`,
-    { size: 'modal-note', onMount(root) {
+    { size: 'modal-note', editable: true, onMount(root) {
       const cont = document.getElementById('qnContent');
       cont.focus(); cont.selectionStart = cont.selectionEnd = cont.value.length;
       const onKey = (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') document.getElementById('qnSave').click(); };
@@ -1978,6 +2558,7 @@ UI.taskFeedback = (id) => {
     <div class="form-item"><label>最新反馈 *</label><textarea id="tfContent" placeholder="处理进展、遇到的问题…">${NK.esc(t.latestFeedback || '')}</textarea></div>
     <div class="form-item"><label>下一步计划</label><input id="tfNext" value="${NK.esc(t.nextAction || '')}"></div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="tfOk">保存反馈</button>`, {
+    editable: true,
     onMount(root) {
       root.querySelector('#tfOk').onclick = () => {
         const st = root.querySelector('#tfStatus').value;
@@ -2103,6 +2684,7 @@ UI.projectCreate = (quarter) => {
     ${quarter ? `<div class="hint">将自动生成 ${inspect.length} 项巡检子任务（机房检查/监管机检查/巡检单提交等）</div>` : ''}
     <div class="form-item"><label>验收要求</label><input id="pjAccept" placeholder="如：全部子任务完成并附照片">`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="pjOk">创建专项</button>`, {
+    editable: true,
     onMount(root) {
       root.querySelector('#pjOk').onclick = () => {
         const name = root.querySelector('#pjName').value.trim();
@@ -2591,6 +3173,7 @@ UI.siteAdd = () => {
     <div class="form-item"><label>默认工程师</label><select id="saEng"><option value="">未指定</option>${NK.db.engineers.map(e => `<option value="${NK.esc(e.name)}">${NK.esc(NK.v.engName(e.name))}</option>`).join('')}</select></div>
     <div class="form-item"><label>备注</label><textarea id="saRemark" placeholder="职场备注、撤场计划等"></textarea></div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="saOk">创建职场</button>`, {
+    editable: true,
     onMount(root) {
       root.querySelector('#saOk').onclick = () => {
         const name = root.querySelector('#saName').value.trim();
@@ -2692,6 +3275,7 @@ UI.engAdd = () => {
     <div class="form-item"><label>驻场区域（多个用、分隔）</label><input id="eaOnsite" placeholder="如：湖州、上海"></div>
     <div class="form-item"><label>远程支持区域</label><input id="eaRemote" placeholder="如：南京、苏州"></div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="eaOk">创建工程师</button>`, {
+    editable: true,
     onMount(root) {
       root.querySelector('#eaOk').onclick = () => {
         const name = root.querySelector('#eaName').value.trim();
@@ -2721,26 +3305,38 @@ UI.leaveStatusBadge = (st) => {
   const map = {
     '无需派单': 'ok', '已创建派单': 'done', '待创建派单': 'warn', '未判断': 'gray', '已取消': 'gray',
   };
-  return `<span class="badge ${map[st] || 'gray'}">${st}</span>`;
+  const label = st === '已创建派单' ? '已安排补位' : st;
+  return `<span class="badge ${map[st] || 'gray'}">${label}</span>`;
 };
 
 /** 休假记录列表 */
-UI.renderLeaveRecords = (body) => {
-  const f = NK.leaveFilter = NK.leaveFilter || { scope: 'all' };
-  const scope = f.scope || 'all';
+UI.renderLeaveRecords = (body, opts) => {
+  opts = opts || {};
+  const hideCreateBtn = !!opts.hideCreateBtn;
+  if (body && body.dataset) body.dataset.hideLeaveCreateBtn = hideCreateBtn ? '1' : '';
+  const f = NK.leaveFilter = NK.leaveFilter || { scope: '全部' };
+  const scope = f.scope || '全部';
   const today = NK.today();
   const month = today.slice(0, 7);
   let list = [...NK.db.leaves].sort((a, b) => b.startDate.localeCompare(a.startDate) || b.createdAt.localeCompare(a.createdAt));
   if (scope === '今天') list = list.filter(l => l.recordStatus === '有效' && NK.leavesOnDate(today).some(x => x.leaveId === l.leaveId));
   else if (scope === '明天') list = list.filter(l => l.recordStatus === '有效' && NK.leavesTomorrow().some(x => x.leaveId === l.leaveId));
   else if (scope === '本月') list = list.filter(l => l.startDate.slice(0, 7) === month || l.endDate.slice(0, 7) === month);
+  else if (scope === '待安排补位') list = list.filter(l => l.recordStatus === '有效' && l.dispatchStatus === '待创建派单');
 
-  const scopes = ['全部', '今天', '明天', '本月'];
+  const scopes = ['全部', '今天', '明天', '本月', '待安排补位'];
   const rows = list.map(l => {
     const vName = NK.v.engName(l.engineerName);
     const sitesLabel = (l.responsibleSitesSnapshot || []).map(s => NK.v.siteName(s.siteName)).join('、') || '—';
     const days = NK.daysBetween(l.startDate, l.endDate) + 1;
     const linked = l.relatedDispatchId ? NK.getDispatch(l.relatedDispatchId) : null;
+    const actBtns = [
+      `<button class="btn btn-sm" onclick="UI.leaveDetail('${l.leaveId}')">查看</button>`,
+      l.recordStatus === '有效' ? `<button class="btn btn-sm" onclick="UI.leaveEdit('${l.leaveId}')">编辑</button>` : '',
+      l.recordStatus === '有效' && l.dispatchStatus === '待创建派单' ? `<button class="btn btn-sm btn-accent" onclick="UI.leaveCreateDispatch('${l.leaveId}')">创建补位派单</button>` : '',
+      linked ? `<button class="btn btn-sm" onclick="UI.dispatchDetail('${linked.id}')">查看关联派单</button>` : '',
+      l.recordStatus === '有效' ? `<button class="btn btn-sm btn-danger" onclick="UI.leaveCancel('${l.leaveId}')">取消休假</button>` : '',
+    ].filter(Boolean).join('');
     return `<tr>
       <td><div style="font-weight:600">${NK.esc(vName)}</div>${l.recordStatus === '已取消' ? '<div style="font-size:10px;color:var(--text-3)">已取消</div>' : ''}</td>
       <td>${NK.esc(l.startDate)}<div class="num" style="font-size:11px">${l.endDate !== l.startDate ? '至 ' + NK.esc(l.endDate) : ''}</div></td>
@@ -2749,21 +3345,18 @@ UI.renderLeaveRecords = (body) => {
       <td>${UI.leaveStatusBadge(l.dispatchStatus)}</td>
       <td>${linked ? `<a href="javascript:void(0)" onclick="UI.dispatchDetail('${linked.id}')">${NK.esc(linked.no)}</a>` : (l.dispatchStatus === '待创建派单' ? `<button class="btn btn-sm btn-accent" onclick="UI.leaveCreateDispatch('${l.leaveId}')">去创建</button>` : '—')}</td>
       <td>${l.remark ? `<span title="${NK.esc(l.remark)}">${NK.esc(String(l.remark).slice(0, 12))}${String(l.remark).length > 12 ? '…' : ''}</span>` : '—'}</td>
-      <td style="white-space:nowrap">
-        <button class="btn btn-sm" onclick="UI.leaveDetail('${l.leaveId}')">查看</button>
-        ${l.recordStatus === '有效' ? `<button class="btn btn-sm" onclick="UI.leaveEdit('${l.leaveId}')">编辑</button>` : ''}
-      </td>
+      <td style="white-space:nowrap">${actBtns}</td>
     </tr>`;
   }).join('');
 
   body.innerHTML = `
     <div class="leave-toolbar">
       <div class="leave-scopes">
-        ${scopes.map(s => `<button class="res-tab${scope === s ? ' active' : ''}" onclick="NK.leaveFilter.scope='${s}';UI.renderLeaveRecords(document.getElementById('resTabBody'))">${s}</button>`).join('')}
+        ${scopes.map(s => `<button class="res-tab${scope === s ? ' active' : ''}" onclick="NK.leaveFilter.scope='${s}';UI.renderLeaveRecords(document.getElementById('${body.id}'), {hideCreateBtn: document.getElementById('${body.id}').dataset.hideLeaveCreateBtn === '1'})">${s}</button>`).join('')}
       </div>
-      <div style="display:flex;gap:8px">
+      ${hideCreateBtn ? '' : `<div style="display:flex;gap:8px">
         <button class="btn btn-accent" onclick="UI.leaveCreate()">＋ 登记休假</button>
-      </div>
+      </div>`}
     </div>
     <div class="card"><div class="table-wrap"><table class="tbl">
       <thead><tr><th>工程师</th><th>开始日期</th><th>时段</th><th>负责职场</th><th>补位状态</th><th>关联派单</th><th>备注</th><th>操作</th></tr></thead>
@@ -2771,8 +3364,33 @@ UI.renderLeaveRecords = (body) => {
     </table></div></div>`;
 };
 
+/** 独立「休假与补位」管理页面（左侧一级菜单） */
+UI.renderLeave = () => {
+  const el = document.getElementById('view-leave');
+  el.innerHTML = UI.pageHead('工程师休假与补位管理', '记录工程师休假安排，及时确认驻场支持是否需要补位。',
+    `<button class="btn btn-accent" onclick="UI.leaveCreate()">＋ 登记休假</button>`) +
+    `<div id="leaveTabBody"></div>`;
+  UI.renderLeaveRecords(document.getElementById('leaveTabBody'), { hideCreateBtn: true });
+};
+
+/** 休假数据变更后，刷新当前所在页面（独立休假页 或 工程师页内的休假记录页签） */
+UI.refreshLeaveView = () => {
+  if (NK.currentView === 'leave') { UI.renderLeave(); return; }
+  if (NK.currentView === 'resources') { UI.renderResources(); return; }
+  UI.nav('leave');
+};
+
 /** 登记休假弹窗（极简表单 + 是否需要派单判断） */
 UI.leaveCreate = (prefillEngName) => {
+  // 防重复：若栈中已存在一个打开的休假登记弹窗，则不重复打开，避免连点/重复事件产生多个窗口
+  for (let i = UI.__stack.length - 1; i >= 0; i--) {
+    const en = UI.__stack[i];
+    if (en && en.layer && en.layer.innerHTML && en.layer.innerHTML.includes('lvEng') && en.layer.innerHTML.includes('登记休假')) {
+      try { if (typeof en.layer.classList !== 'undefined' && en.layer.classList.remove) en.layer.classList.remove('hidden'); } catch (e) {}
+      return;
+    }
+  }
+  let initSnapshot = null;
   const engOpts = NK.db.engineers.map(e => `<option value="${NK.esc(e.id)}" ${prefillEngName && e.name === prefillEngName ? 'selected' : ''}>${NK.esc(NK.v.engName(e.name))}</option>`).join('');
   const today = NK.today();
   const body = `
@@ -2799,7 +3417,22 @@ UI.leaveCreate = (prefillEngName) => {
     </div>`;
   UI.modal('登记休假', body,
     `<button class="btn" data-close>取消</button>`,
-    { size: 'modal-md', onMount(root) {
+    { size: 'modal-md',
+      onBeforeClose(close, reason) {
+        try {
+          const g = (id) => { const el = document.getElementById(id); return el ? el.value : ''; };
+          const now = { eng: g('lvEng'), s: g('lvStart'), e: g('lvEnd'), p: g('lvPeriod'), r: document.getElementById('lvRemark') ? document.getElementById('lvRemark').value : '' };
+          const same = now.eng === initSnapshot.eng && now.s === initSnapshot.s && now.e === initSnapshot.e && now.p === initSnapshot.p && now.r === initSnapshot.r;
+          if (!same) { UI.confirmDiscard('当前休假登记还没有保存，确定放弃吗？'); return; }
+        } catch (e) {}
+        close();
+      },
+      onMount(root) {
+      // 记录初始快照（未保存判断基准）
+      initSnapshot = (() => {
+        const g = (id) => { const el = document.getElementById(id); return el ? el.value : ''; };
+        return { eng: g('lvEng'), s: g('lvStart'), e: g('lvEnd'), p: g('lvPeriod'), r: document.getElementById('lvRemark') ? document.getElementById('lvRemark').value : '' };
+      })();
       UI.leaveEngChanged();
       UI.leaveDateChanged();
       root.querySelector('#lvNeedDispatch').onclick = () => UI.leaveSave(true, root);
@@ -2873,7 +3506,7 @@ UI.leaveSave = (needDispatch, root) => {
   if (!rec) { UI.toast('保存失败，请重试', 'warn'); return; }
   UI.modalClose();
   UI.toast('花姐，休假记录已经记下来了。🌴');
-  UI.renderResources();
+  UI.refreshLeaveView();
   if (needDispatch) {
     // 2) 需要派单：跳转到现有派单页面并预填该工程师的职场与补位原因
     UI.leaveCreateDispatch(rec.leaveId);
@@ -2964,6 +3597,7 @@ UI.leaveEdit = (leaveId) => {
     ${l.relatedDispatchId ? `<div class="hint" style="color:var(--warn)">该记录已关联补位派单 ${NK.esc(l.relatedDispatchNo || '')}。休假时间调整后，请确认关联补位派单是否也需要修改。</div>` : ''}`;
   UI.modal('编辑休假', body,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="leOk">保存</button>`, {
+    editable: true,
     onMount(root) {
       root.querySelector('#leOk').onclick = () => {
         const start = root.querySelector('#leStart').value;
@@ -2988,7 +3622,7 @@ UI.leaveEdit = (leaveId) => {
         });
         UI.modalClose();
         UI.toast('花姐，休假记录已更新 ✓');
-        UI.renderResources();
+        UI.refreshLeaveView();
       };
     },
   });
@@ -3007,7 +3641,7 @@ UI.leaveCancel = (leaveId) => {
         UI.confirm(`该休假已关联补位派单 ${NK.esc(linked.no)}。补位派单不会自动删除，请自行确认该派单是否仍然需要。`, () => {}, '我知道了');
       }
       UI.toast('花姐，休假已取消。');
-      UI.renderResources();
+      UI.refreshLeaveView();
     }, '确定取消');
 };
 
@@ -3117,6 +3751,7 @@ UI.kpiEventCreate = () => {
     <div class="form-item"><label>原因说明 *</label><textarea id="keReason" placeholder="具体经过、影响…"></textarea></div>
     <div class="form-item"><label>证据（可选）</label><input id="keEvidence" placeholder="如：聊天截图/工单号/照片"></div>`,
     `<button class="btn" data-close>取消</button><button class="btn btn-accent" id="keOk">登记事件</button>`, {
+    editable: true,
     onMount(root) {
       const itemSel = root.querySelector('#keItem');
       const ptsInp = root.querySelector('#kePts');
@@ -3810,41 +4445,200 @@ UI.renderAbout = () => {
 };
 
 /* ============================================================
-   花姐助手面板
+   花姐助手面板（操作助手）
+   ------------------------------------------------------------
+   支持：结果卡片 / 操作按钮（查看、撤销、确认）/ 加载提示 /
+   欢迎语与快捷指令 / 当前会话上下文（"它/补一句"）/
+   操作日志面板入口
    ============================================================ */
 UI.bindAssistant = () => {
   const panel = document.getElementById('assistantPanel');
   const body = document.getElementById('apBody');
   const input = document.getElementById('apInput');
-  const push = (who, text) => {
+  // 当前会话上下文（供"它/补一句"引用最近意图）
+  const ctx = { lastIntent: null };
+  // 快捷指令
+  const quickCmds = [
+    '今天有什么待办？', '新增任务，明天下午确认南京网络问题', '今日日常任务全部完成',
+    '今天谁休假？', '创建派单，湖州打印机无法打印', '生成今日交接',
+  ];
+
+  /** 执行 act 动作（供结果卡片按钮回调） */
+  const runAct = (act, arg) => {
+    try {
+      if (!act) return;
+      if (act === 'nav') { UI.nav(arg); return; }
+      if (act === 'taskDetail') { UI.taskDetail(arg); return; }
+      if (act === 'projectDetail') { UI.projectDetail(arg); return; }
+      if (act === 'dispatchDetail') { UI.dispatchDetail(arg); return; }
+      if (act === 'assistantUndo') {
+        const res = NK.assistant.undo(arg);
+        pushBot({ text: res.msg });
+        return;
+      }
+      if (act === 'assistantCompletePick') {
+        pushBot(NK.assistant.completePick(arg)[0]); return;
+      }
+      if (act === 'assistantUpdatePick') {
+        const parts = String(arg).split('__SUB__');
+        const id = parts[0];
+        const sub = parts.length > 1 ? decodeURIComponent(parts[1]) : '';
+        pushBot(NK.assistant.updatePick(id, sub)[0]); return;
+      }
+      if (act === 'assistantConfirmDailyAll') {
+        pushBot(NK.assistant.confirmDailyAll(arg)[0]); return;
+      }
+      if (act === 'assistantConfirmClearAlerts') {
+        pushBot(NK.assistant.confirmClearAlerts()[0]); return;
+      }
+      if (act === 'assistantConfirmIntent') {
+        pushBot(NK.assistant.confirmIntent(arg)[0]); return;
+      }
+      if (act === 'assistantRevokePick') {
+        pushBot(NK.assistant.x_dispatch_revoke({ dispatchId: arg, candidates: [] })[0]); return;
+      }
+      if (act === 'assistantDeletePick') {
+        pushBot(NK.assistant.x_dispatch_delete({ dispatchId: arg, candidates: [] })[0]); return;
+      }
+      if (act === 'assistantConfirmRevokeDispatch') {
+        const r = NK.assistant.confirmRevokeDispatch(arg);
+        pushBot({ text: r.msg });
+        if (r.ok) { UI.renderHome(); UI.refreshBadges(); UI.renderDispatch(); }
+        return;
+      }
+      if (act === 'assistantConfirmDeleteDispatch') {
+        const r = NK.assistant.confirmDeleteDispatch(arg);
+        pushBot({ text: r.msg });
+        if (r.ok) { UI.renderHome(); UI.refreshBadges(); UI.renderDispatch(); }
+        return;
+      }
+      if (act === 'assistantNoop') { return; }
+      if (act === 'assistantShowLogs') {
+        UI.assistantLogs();
+        return;
+      }
+      // 其他 JS 表达式
+      // eslint-disable-next-line no-eval
+      eval(act);
+    } catch (e) {
+      UI.toast('花姐，这个操作暂时没成功，请重试～', 'warn');
+    }
+  };
+
+  /** 推送一条消息（支持纯文本或 {text, actions} 结构） */
+  const push = (who, content) => {
     const d = document.createElement('div');
-    d.className = 'ap-msg ' + (who === 'me' ? 'me' : 'bot');
-    d.textContent = text;
+    d.className = 'ap-msg ' + (who === 'me' ? 'me' : 'her');
+    if (typeof content === 'string') {
+      d.textContent = content;
+    } else {
+      const textDiv = document.createElement('div');
+      textDiv.className = 'ap-text';
+      textDiv.textContent = content.text || '';
+      d.appendChild(textDiv);
+      if (content.actions && content.actions.length) {
+        const actWrap = document.createElement('div');
+        actWrap.className = 'am-actions';
+        content.actions.forEach(a => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'am-btn';
+          b.textContent = a.label;
+          b.onclick = () => runAct(a.act, a.arg);
+          actWrap.appendChild(b);
+        });
+        d.appendChild(actWrap);
+      }
+    }
     body.appendChild(d);
     body.scrollTop = body.scrollHeight;
+    return d;
   };
+
+  const pushBot = (content) => push('her', content);
+  const pushMe = (text) => push('me', text);
+
+  /** 发送处理 */
   const ask = () => {
     const q = input.value.trim();
     if (!q) return;
-    push('me', q);
+    pushMe(q);
     input.value = '';
-    const replies = NK.assistantReply(q);
-    setTimeout(() => replies.forEach(r => push('bot', r)), 150);
+    // 加载提示
+    const loading = document.createElement('div');
+    loading.className = 'ap-msg her ap-loading';
+    loading.textContent = '花姐助手正在理解你的意思…';
+    body.appendChild(loading);
+    body.scrollTop = body.scrollHeight;
+    setTimeout(() => {
+      try {
+        const replies = (NK.assistant && NK.assistant.handle) ? NK.assistant.handle(q, ctx) : NK.assistantReply(q);
+        loading.remove();
+        (Array.isArray(replies) ? replies : [{ text: replies }]).forEach(r => pushBot(r));
+      } catch (e) {
+        loading.remove();
+        pushBot({ text: '花姐，助手处理时出了点小问题，麻烦换个说法试试～' });
+      }
+    }, 180);
   };
+
+  /** 欢迎语 + 快捷指令 */
+  const welcome = () => {
+    pushBot('花姐你好呀 ✨\n你可以直接告诉我想查什么、记录什么或完成什么。');
+    const tips = document.createElement('div');
+    tips.className = 'ap-quick';
+    quickCmds.forEach(c => {
+      const q = document.createElement('button');
+      q.type = 'button';
+      q.className = 'ap-quick-btn';
+      q.textContent = c;
+      q.onclick = () => { input.value = c; ask(); };
+      tips.appendChild(q);
+    });
+    body.appendChild(tips);
+  };
+
   document.getElementById('assistantBtn').onclick = () => {
     panel.classList.toggle('hidden');
     if (!panel.classList.contains('hidden')) {
       input.focus();
-      if (!body.children.length) {
-        push('bot', '花姐你好呀 ✨ 我是你的运维助手，随时待命～');
-        push('bot', '可以这样问我：');
-        push('bot', '· 湖州谁负责？\n· 今天有什么超时？\n· 有哪些待办？\n· 本月KPI怎么样？\n· 怎么派单？');
-      }
+      if (!body.children.length) welcome();
     }
   };
   document.getElementById('apClose').onclick = () => panel.classList.add('hidden');
   document.getElementById('apSend').onclick = ask;
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') ask(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); ask(); }
+  });
+};
+
+/** 操作日志面板 */
+UI.assistantLogs = () => {
+  const logs = (NK.assistant && NK.assistant.logs) ? NK.assistant.logs() : [];
+  if (!logs.length) {
+    UI.toast('花姐，目前还没有助手操作记录～', 'ok');
+    return;
+  }
+  const rows = logs.map(l => `
+    <div class="al-row">
+      <div class="al-line"><span class="badge ${l.undone ? 'gray' : 'accent'}">${l.undone ? '已撤销' : '已执行'}</span>
+        <strong>${NK.esc(l.summary || l.action)}</strong></div>
+      <div class="al-sub">${NK.esc(l.targetModule || '')} · ${NK.fmtDT(new Date(l.time))}</div>
+      ${l.raw ? `<div class="al-raw">原话：${NK.esc(l.raw)}</div>` : ''}
+      ${!l.undone && l.snapshot ? `<button class="btn btn-sm" data-op="${NK.esc(l.operationId)}">撤销</button>` : ''}
+    </div>`).join('');
+  UI.modal('花姐助手 · 操作记录', `<div class="al-list">${rows}</div>`,
+    `<button class="btn" data-close>关闭</button>`,
+    { size: 'modal-md', onMount(root) {
+      root.querySelectorAll('[data-op]').forEach(b => {
+        b.onclick = () => {
+          const res = NK.assistant.undo(b.dataset.op);
+          UI.toast(res.msg, res.ok ? 'ok' : 'warn');
+          UI.modalClose();
+          UI.assistantLogs();
+        };
+      });
+    } });
 };
 
 /* ============================================================
@@ -3875,6 +4669,32 @@ UI.init = () => {
     document.body.appendChild(b);
   }
   document.getElementById('modeSwitch').onclick = () => UI.toggleMode();
+
+  // —— 全站按钮类型归一：确保非提交按钮均为 type="button" ——
+  // 本应用无 <form>，按钮默认 type 为 submit 不会触发表单提交，
+  // 但为满足「非提交按钮必须 type='button'」的验收要求，统一归一化。
+  // 通过 MutationObserver 覆盖 #main 视图与 #modalRoot 弹窗的后续动态按钮。
+  UI.__normalizeButtons = (scope) => {
+    (scope || document).querySelectorAll('button').forEach((b) => {
+      if (!b.getAttribute('type')) b.setAttribute('type', 'button');
+    });
+  };
+  if (typeof MutationObserver !== 'undefined') {
+    UI.__btnObserver = new MutationObserver((muts) => {
+      for (const m of muts) {
+        m.addedNodes.forEach((n) => {
+          if (n.nodeType !== 1) return;
+          if (n.tagName === 'BUTTON' && !n.getAttribute('type')) n.setAttribute('type', 'button');
+          else UI.__normalizeButtons(n);
+        });
+      }
+    });
+    const mainEl = document.getElementById('main');
+    const modalEl2 = document.getElementById('modalRoot');
+    if (mainEl) UI.__btnObserver.observe(mainEl, { childList: true, subtree: true });
+    if (modalEl2) UI.__btnObserver.observe(modalEl2, { childList: true, subtree: true });
+  }
+  UI.__normalizeButtons(document);
   // 每日任务与首屏
   NK.ensureFixedTasks();
   NK.save();

@@ -111,14 +111,19 @@ a { color: var(--primary-light); }
 .nav-group { margin-bottom: 6px; }
 .nav-bottom { margin-top: auto; border-top: 1px solid var(--border); padding-top: 8px; }
 .nav-item {
-  display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-radius: 8px;
-  color: var(--text-2); cursor: pointer; font-size: 13px; margin-bottom: 2px; transition: all .12s;
+  display: flex; align-items: center; padding: 15px 18px 15px 24px; border-radius: 8px;
+  color: var(--text-2); cursor: pointer; font-size: 13px; margin-bottom: 2px; transition: background .12s;
   user-select: none;
 }
-.nav-item .nav-ico { width: 18px; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; color: var(--text-3); }
+/* 侧边栏 Emoji 图标区：固定宽度对齐，Emoji 垂直居中，无底座无外框 */
+.nav-item .nav-ico {
+  width: 32px; min-width: 32px; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 19px; line-height: 1; margin-right: 11px; color: var(--text-3);
+}
 .nav-item:hover { background: var(--bg); color: var(--text); }
 .nav-item.active { background: var(--accent-soft); color: var(--primary); font-weight: 700; }
-.nav-item.active .nav-ico { color: var(--accent); }
+/* 选中项 Emoji 略微提亮，不加底色、不加外框、无动画 */
+.nav-item.active .nav-ico { filter: saturate(1.1) contrast(1.02); }
 .nav-badge {
   margin-left: auto; background: var(--danger); color: #fff; font-size: 10px; font-weight: 700;
   border-radius: 10px; padding: 1px 7px; min-width: 18px; text-align: center;
@@ -704,7 +709,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .quick-grid { grid-template-columns: repeat(3, 1fr); }
 }
 @media (max-width: 900px) {
-  #sidebar { width: 56px; }
+  #sidebar { width: 56px; padding: 10px 4px; }
+  .nav-item { justify-content: center; padding: 15px 0; }
+  .nav-item .nav-ico { margin-right: 0; }
   .nav-item span:not(.nav-ico) { display: none; }
   .brand-text { display: none; }
   .brand { min-width: auto; }

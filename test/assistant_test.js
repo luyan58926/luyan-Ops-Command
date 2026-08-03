@@ -240,5 +240,52 @@ const lowIntent = JSON.stringify({ intent: 'action', action: 'task_create', targ
 const lowR = run('NK.assistant.confirmIntent(' + JSON.stringify(lowIntent) + ')');
 ok(lowR[0].text.indexOf('测试低置信度') !== -1, '低置信度意图确认后执行成功');
 
+console.log('== 十二、花姐助手撤销/删除派单指令 ==');
+// 准备一条唯一派单：撤销山东青岛打印机派单
+run('NK.db.dispatches = []; NK.db.tasks = []; NK.db.leaves = []; NK.save();');
+const revD = run(`(function(){ const d = NK.createDispatch({ title: '山东青岛打印机处理', siteName: '青岛中宏', city: '青岛', engineer: '李亚男' }); return d.id; })()`);
+// 唯一匹配 → 展示摘要确认，不直接执行
+let rv = handle('撤销山东青岛打印机派单');
+ok(rv[0].text.indexOf('撤销') !== -1 && rv[0].text.indexOf('山东青岛打印机处理') !== -1, '撤销派单指令返回摘要确认');
+ok(rv[0].requiresConfirmation === true, '撤销派单需确认');
+ok(rv[0].actions.some(a => a.act === 'assistantConfirmRevokeDispatch'), '提供确认撤销按钮');
+ok(run('NK.db.dispatches[0].status !== \'已撤销\''), '未确认前不执行撤销');
+// 确认后执行撤销
+let cr = run('NK.assistant.confirmRevokeDispatch("' + revD + '")');
+ok(cr.ok === true, '确认撤销成功');
+ok(run('NK.db.dispatches[0].status === \'已撤销\''), '确认后状态改为已撤销');
+ok(run('NK.db.dispatches[0].revokedBy === \'花姐\''), '撤销操作人=花姐');
+// 已撤销派单再撤销 → 被拒绝
+cr = run('NK.assistant.confirmRevokeDispatch("' + revD + '")');
+ok(cr.ok === false, '重复撤销被拒绝');
+// 助手撤销操作可撤销（undo 恢复）
+const undoR = run('NK.assistant.undoLast()');
+ok(undoR.ok === true, '助手撤销操作可撤销');
+ok(run('NK.db.dispatches[0].status !== \'已撤销\''), '撤销后派单状态恢复');
+
+console.log('== 十三、删除派单指令二次确认 ==');
+// 删除一条未发送派单 → 需二次确认
+run('NK.db.dispatches = []; NK.db.tasks = []; NK.save();');
+const delD = run(`(function(){ const d = NK.createDispatch({ title: '测试重复派单' }); return d.id; })()`);
+let dv = handle('删除测试重复派单');
+ok(dv[0].text.indexOf('删除') !== -1, '删除派单指令返回确认卡片');
+ok(dv[0].requiresConfirmation === true, '删除需二次确认');
+ok(dv[0].actions.some(a => a.act === 'assistantConfirmDeleteDispatch'), '提供确认删除按钮');
+ok(run('NK.db.dispatches[0].recordStatus !== \'已删除\''), '未确认前不删除');
+// 确认后删除进回收站
+let cd = run('NK.assistant.confirmDeleteDispatch("' + delD + '")');
+ok(cd.ok === true, '确认删除成功');
+ok(run('NK.db.dispatches[0].recordStatus === \'已删除\''), '确认后 recordStatus=已删除');
+ok(run('NK.db.dispatches.length === 1'), '删除进回收站不物理删除');
+
+console.log('== 十四、已处理派单助手删除被引导 ==');
+run('NK.db.dispatches = []; NK.db.tasks = []; NK.save();');
+const pD = run(`(function(){ const d = NK.createDispatch({ title: '已处理故障' }); return d.id; })()`);
+run('NK.db.dispatches[0].status = \'已处理\';');
+let pv = handle('删除已处理故障派单');
+ok(pv[0].text.indexOf('撤销') !== -1, '已处理派单助手删除引导改为撤销');
+ok(pv[0].actions.some(a => a.act === 'assistantConfirmRevokeDispatch'), '提供改为撤销按钮');
+ok(run('NK.db.dispatches[0].recordStatus !== \'已删除\''), '已处理派单未被删除');
+
 console.log('\n=== 结果: ' + pass + ' 通过, ' + fail + ' 失败 ===');
 process.exit(fail ? 1 : 0);

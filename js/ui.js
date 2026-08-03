@@ -327,7 +327,7 @@ UI.refreshBadges = () => {
   const n1 = document.getElementById('navBadgeDispatch');
   const n2 = document.getElementById('navBadgeTasks');
   const n3 = document.getElementById('navBadgeNotes');
-  const waitCount = NK.db.dispatches.filter(x => x.status === '已生成').length;
+  const waitCount = NK.db.dispatches.filter(x => x.status === '已生成' && !NK.dispatchInactive(x)).length;
   n1.textContent = waitCount; n1.classList.toggle('hidden', !waitCount);
   n2.textContent = d; n2.classList.toggle('hidden', !d);
   const notesCount = (NK.db.quickNotes || []).filter(x => !x.archived && !x.deleted).length;
@@ -360,7 +360,7 @@ UI.renderHome = () => {
   const today = NK.today();
 
   const rem = NK.genReminders();
-  const disps = NK.db.dispatches;
+  const disps = NK.db.dispatches.filter(d => !NK.dispatchInactive(d));
   const tasks = NK.db.tasks;
 
   const focusItems = NK.genFocusItems();
@@ -394,7 +394,7 @@ UI.renderHome = () => {
     </a>`
   ).join('');
 
-  // ── 区域4a：花姐今天重点盯这三件（简化版：只显事实项名称）──
+  // ── 区域4a：花姐今天重点盯这几件（简化版：只显事实项名称）──
   const focusItemsHTML = focusItems.length ? focusItems.map((f, idx) => {
     const num = ['①','②','③'][idx] || (idx + 1) + '.';
     const dot = f.tagLevel === 'danger'
@@ -408,12 +408,12 @@ UI.renderHome = () => {
   }).join('') : `
     <div class="fc-empty">
       <div class="fc-empty-icon">✨</div>
-      <div class="fc-empty-text">今天没有特别需要盯的事项</div>
+      <div class="fc-empty-text">今天没有特别需要盯的事项。</div>
     </div>`;
 
   const focusHTML = `<div class="fc-card">
     <div class="fc-card-head">
-      <div class="fc-title"><span class="fc-title-icon">👀</span> 花姐今天重点盯这三件</div>
+      <div class="fc-title"><span class="fc-title-icon">👀</span> 花姐今天重点盯这几件</div>
       ${focusItems.length ? `<span class="badge wait">${focusItems.length}件</span>` : '<span class="badge ok">✓</span>'}
     </div>
     <div class="fc-body">${focusItemsHTML}</div>
@@ -659,12 +659,15 @@ UI.renderDispatch = (filterArg) => {
   const f = NK.dispatchFilter;
   const today = NK.today();
   let list = [...NK.db.dispatches].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  if (f.status && f.status !== '全部') list = list.filter(d => d.status === f.status);
+  // 默认"全部"不包含已删除记录；仅在"已删除"筛选中显示回收站内容
+  const showDeleted = f.status === '已删除';
+  list = list.filter(d => (d.recordStatus === '已删除') === showDeleted);
+  if (f.status && f.status !== '全部' && f.status !== '已删除') list = list.filter(d => d.status === f.status);
   if (f.priority && f.priority !== '全部') list = list.filter(d => d.priority === f.priority);
   if (f.q) list = list.filter(d => `${d.no} ${d.title} ${d.city} ${d.engineer} ${d.contactName}`.includes(f.q));
   if (f.overdue) list = list.filter(d => d.planDone && d.planDone < today && d.status !== '已闭环' && d.status !== '已取消');
 
-  const statusOpts = ['全部', ...NK.DISPATCH_STATUS, '已取消', '已暂停'];
+  const statusOpts = ['全部', '已删除', ...NK.DISPATCH_STATUS, '已取消', '已暂停', '已撤销'];
   const priOpts = ['全部', 'P1', 'P2', 'P3'];
 
   el.innerHTML = UI.pageHead('派单中心', '全国派单 · 任务闭环 · 一次录入多处复用',
@@ -681,23 +684,43 @@ UI.renderDispatch = (filterArg) => {
       <thead><tr><th>派单编号</th><th>事项</th><th>职场</th><th>工程师</th><th>优先级</th><th>状态</th><th>计划完成</th><th>等待时长</th><th>操作</th></tr></thead>
       <tbody>${list.length ? list.map(d => {
         const disp = NK.v.dispatch(d);
-        return `<tr>
+        const inactive = NK.dispatchInactive(d) || d.recordStatus === '已删除';
+        const rowDim = inactive ? ' style="opacity:.62;filter:grayscale(.4)"' : '';
+        // 操作按钮：详情始终；催办仅正常待发送；更多菜单（撤销/删除）仅未撤销未删除记录；已撤销可恢复；回收站内可恢复/永久删除
+        let ops = `<button class="btn btn-sm" onclick="UI.dispatchDetail('${d.id}')">详情</button>`;
+        if (d.status === '已生成' && !inactive) {
+          ops += `<button class="btn btn-sm btn-warn" onclick="UI.dispatchUrgent('${d.id}')">催办</button>`;
+        }
+        if (d.status === '待花姐验收' && !inactive) {
+          ops += `<button class="btn btn-sm btn-accent" onclick="UI.dispatchAccept('${d.id}')">验收</button>`;
+        }
+        if (d.recordStatus === '已删除') {
+          ops += `<button class="btn btn-sm" onclick="UI.dispatchRestore('${d.id}')">恢复</button>`;
+          ops += `<button class="btn btn-sm btn-danger" onclick="UI.dispatchPurge('${d.id}')">永久删除</button>`;
+        } else if (d.status === '已撤销') {
+          ops += `<button class="btn btn-sm" onclick="UI.dispatchUnrevoke('${d.id}')">恢复派单</button>`;
+        } else {
+          ops += `<span style="position:relative">
+            <button class="btn btn-sm" data-more="${d.id}">更多 ▾</button>
+            <span class="dm-menu" id="dmMenu${d.id}" style="display:none;position:absolute;right:0;top:100%;z-index:30;background:var(--bg-card,#fff);border:1px solid var(--line,#e5e5e5);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);padding:4px;min-width:110px">
+              <button class="dm-item" style="display:block;width:100%;text-align:left;background:none;border:none;padding:7px 10px;cursor:pointer;font-size:12px;border-radius:6px" onclick="UI.dispatchRevoke('${d.id}')">撤销派单</button>
+              <button class="dm-item" style="display:block;width:100%;text-align:left;background:none;border:none;padding:7px 10px;cursor:pointer;font-size:12px;border-radius:6px;color:var(--danger,#d93025)" onclick="UI.dispatchDelete('${d.id}')">删除记录</button>
+            </span>
+          </span>`;
+        }
+        return `<tr${rowDim}>
           <td class="num">${d.no}</td>
           <td style="max-width:240px"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${NK.esc(d.title)}</div>
             <div style="color:var(--text-3);font-size:11px">${NK.esc((d.desc || '').slice(0, 30))}</div></td>
           <td>${NK.esc(disp.siteName || d.city)}</td>
           <td>${NK.esc(disp.engineer || '—')}</td>
           <td>${UI.priBadge(d.priority)}</td>
-          <td>${UI.statusBadge(d.status)}${d.urgentCount ? `<div style="font-size:10px;color:var(--warn)">已催${d.urgentCount}次</div>` : ''}</td>
+          <td>${UI.statusBadge(d.status)}${d.urgentCount ? `<div style="font-size:10px;color:var(--warn)">已催${d.urgentCount}次</div>` : ''}${d.revokeReason ? `<div style="font-size:10px;color:var(--text-3)">撤销原因：${NK.esc(d.revokeReason)}</div>` : ''}</td>
           <td>${d.planDone ? d.planDone : '—'}</td>
-          <td>${d.status !== '已闭环' ? NK.waitText(d.createdAt) : '—'}</td>
-          <td style="white-space:nowrap">
-            <button class="btn btn-sm" onclick="UI.dispatchDetail('${d.id}')">详情</button>
-            ${d.status === '已生成' ? `<button class="btn btn-sm btn-warn" onclick="UI.dispatchUrgent('${d.id}')">催办</button>` : ''}
-            ${d.status === '待花姐验收' ? `<button class="btn btn-sm btn-accent" onclick="UI.dispatchAccept('${d.id}')">验收</button>` : ''}
-          </td>
+          <td>${inactive ? '—' : (d.status !== '已闭环' ? NK.waitText(d.createdAt) : '—')}</td>
+          <td style="white-space:nowrap">${ops}</td>
         </tr>`;
-      }).join('') : UI.empty('暂无派单，点击右上角「新建派单」开始', 9)}</tbody>
+      }).join('') : UI.empty(showDeleted ? '回收站为空，暂无已删除派单' : '暂无派单，点击右上角「新建派单」开始', 9)}</tbody>
     </table></div></div>`;
 
   const bind = () => {
@@ -714,6 +737,22 @@ UI.renderDispatch = (filterArg) => {
     document.getElementById('dpStatus').onchange = onFilter;
     document.getElementById('dpPri').onchange = onFilter;
     document.getElementById('dpOverdue').onchange = onFilter;
+    // 更多菜单：点击展开/收起
+    el.querySelectorAll('[data-more]').forEach(btn => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const m = document.getElementById('dmMenu' + btn.getAttribute('data-more'));
+        const all = el.querySelectorAll('.dm-menu');
+        all.forEach(x => { if (x !== m) x.style.display = 'none'; });
+        m.style.display = m.style.display === 'none' ? 'block' : 'none';
+      };
+    });
+    // 点击其他区域关闭更多菜单
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest || !e.target.closest('[data-more], .dm-menu')) {
+        el.querySelectorAll('.dm-menu').forEach(x => x.style.display = 'none');
+      }
+    }, { once: false });
   };
   setTimeout(bind, 0);
 };
@@ -1287,8 +1326,164 @@ UI.dispatchClose = (id) => {
   });
 };
 
-/** 验收入口（从首页/列表） */
-UI.acceptOpen = (id) => {
+/* ============================================================
+   派单撤销 / 删除 / 回收站 / 恢复
+   ============================================================ */
+
+/** 撤销派单：展示摘要 + 撤销原因快捷选项 + 关联任务/休假补位提示 */
+UI.dispatchRevoke = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  const disp = NK.v.dispatch(d);
+  const t = NK.getTask(d.taskId);
+  const leave = NK.db.leaves.find(l => l.relatedDispatchId === d.id);
+  const REASONS = ['用户取消上门', '已远程解决', '需求取消', '重复派单', '计划调整', '其他'];
+  const hasTask = !!t && t.status !== '已取消';
+  const body = `
+    <p style="font-weight:600;margin-bottom:10px">确定撤销这条派单吗？</p>
+    <div class="detail-grid" style="grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+      <div class="dg-item"><span class="dg-label">派单编号</span><span class="dg-val">${d.no}</span></div>
+      <div class="dg-item"><span class="dg-label">事项名称</span><span class="dg-val">${NK.esc(disp.title)}</span></div>
+      <div class="dg-item"><span class="dg-label">职场</span><span class="dg-val">${NK.esc(disp.siteName || d.city || '—')}</span></div>
+      <div class="dg-item"><span class="dg-label">当前工程师</span><span class="dg-val">${NK.esc(disp.engineer || '—')}</span></div>
+    </div>
+    <div class="form-item"><label>撤销原因</label>
+      <div class="qs-grid" style="grid-template-columns:repeat(3,1fr);gap:6px">${REASONS.map(r => `<button class="qs-btn" data-reason="${r}">${r}</button>`).join('')}</div>
+      <input id="rvReason" placeholder="补充说明（可选）" style="margin-top:8px;width:100%;box-sizing:border-box" >
+    </div>
+    ${hasTask ? `<div style="margin-top:12px;padding:10px;background:var(--bg-warn,rgba(255,200,0,.08));border-radius:8px;font-size:12px">
+      <div style="margin-bottom:6px">该派单关联了一条任务（${t.no} ${NK.esc(t.name)}），是否同时取消关联任务？</div>
+      <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="rvCancelTask" checked> <b>同时取消关联任务（推荐）</b></label>
+      <div style="color:var(--text-3);font-size:11px;margin-top:4px">若任务还有其他用途，可取消勾选，只撤销派单保留任务。</div>
+    </div>` : ''}
+    ${leave ? `<div style="margin-top:12px;padding:10px;background:var(--bg-warn,rgba(255,200,0,.08));border-radius:8px;font-size:12px">
+      ⚠️ 该派单关联工程师休假补位。撤销后，休假记录将重新显示为"补位待安排"。
+    </div>` : ''}
+    <p style="margin-top:12px;font-size:11px;color:var(--text-3)">撤销后不会删除派单记录，但该派单将停止催办、超时提醒和后续跟进。</p>`;
+  UI.modal('撤销派单', body, `<button class="btn" data-close>返回</button><button class="btn btn-warn" id="rvOk">确认撤销</button>`, {
+    onMount(root) {
+      // [close] 已由统一弹窗机制绑定
+      let picked = '';
+      root.querySelectorAll('[data-reason]').forEach(b => {
+        b.onclick = () => {
+          root.querySelectorAll('[data-reason]').forEach(x => x.classList.remove('qs-active'));
+          b.classList.add('qs-active');
+          picked = b.getAttribute('data-reason');
+        };
+      });
+      root.querySelector('#rvOk').onclick = () => {
+        const reason = picked || (root.querySelector('#rvReason').value.trim() || '其他');
+        const cancelTask = hasTask ? !!root.querySelector('#rvCancelTask').checked : false;
+        const res = NK.revokeDispatch(d.id, { reason, cancelTask });
+        if (!res.ok) { UI.toast(res.msg, 'err'); return; }
+        if (res.leaveLinked) UI.toast('花姐，补位派单已撤销，休假记录已经重新标记为"补位待安排"。');
+        else UI.toast(res.msg);
+        UI.modalClose();
+        UI.renderHome();
+        UI.refreshBadges();
+        UI.renderDispatch();
+      };
+    },
+  });
+};
+
+/** 删除记录：已处理派单引导撤销；允许删除的走确认 */
+UI.dispatchDelete = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  // 纯状态判断是否已产生处理记录（只引导，不真正删除，避免取消时误删）
+  const processed = ['已发送', '跟进中', '处理中', '等待外部条件', '已处理', '待花姐验收', '已闭环'];
+  if (processed.includes(d.status)) {
+    // 已产生处理记录 → 引导撤销
+    UI.modal('删除记录', `
+      <p style="font-weight:600">这条派单已经产生处理记录</p>
+      <p style="margin-top:8px;font-size:13px;color:var(--text-2)">该派单已经产生处理记录，建议使用"撤销派单"保留过程留痕。</p>
+      <p style="margin-top:8px;font-size:12px;color:var(--text-3)">撤销会保留派单的创建、发送、跟进等历史记录，适合"业务取消"场景；错误且未发送的记录才建议删除进回收站。</p>`,
+      `<button class="btn" data-close>返回</button><button class="btn btn-warn" id="blToRevoke">改为撤销派单</button>`, {
+      onMount(root) {
+        root.querySelector('#blToRevoke').onclick = () => {
+          UI.modalClose();
+          UI.dispatchRevoke(d.id);
+        };
+      },
+    });
+    return;
+  }
+  const disp = NK.v.dispatch(d);
+  const body = `
+    <p style="font-weight:600;margin-bottom:10px">确定删除这条错误派单吗？</p>
+    <div class="detail-grid" style="grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+      <div class="dg-item"><span class="dg-label">派单编号</span><span class="dg-val">${d.no}</span></div>
+      <div class="dg-item"><span class="dg-label">事项</span><span class="dg-val">${NK.esc(disp.title)}</span></div>
+      <div class="dg-item"><span class="dg-label">职场</span><span class="dg-val">${NK.esc(disp.siteName || d.city || '—')}</span></div>
+    </div>
+    <div class="form-item"><label>删除原因</label>
+      <div class="qs-grid" style="grid-template-columns:repeat(3,1fr);gap:6px">${['录入错误', '重复创建', '测试数据', '其他'].map(r => `<button class="qs-btn" data-delreason="${r}">${r}</button>`).join('')}</div>
+      <input id="delReason" placeholder="补充说明（可选）" style="margin-top:8px;width:100%;box-sizing:border-box">
+    </div>
+    <p style="margin-top:12px;font-size:11px;color:var(--text-3)">删除后将从正常派单列表中移除，但会暂时保留在回收站中，可随时恢复。</p>`;
+  UI.modal('删除记录', body, `<button class="btn" data-close>取消</button><button class="btn btn-danger" id="delOk">删除记录</button>`, {
+    onMount(root) {
+      let picked = '';
+      root.querySelectorAll('[data-delreason]').forEach(b => {
+        b.onclick = () => {
+          root.querySelectorAll('[data-delreason]').forEach(x => x.classList.remove('qs-active'));
+          b.classList.add('qs-active');
+          picked = b.getAttribute('data-delreason');
+        };
+      });
+      root.querySelector('#delOk').onclick = () => {
+        const reason = picked || (root.querySelector('#delReason').value.trim() || '录入错误');
+        const r2 = NK.softDeleteDispatch(d.id, { reason });
+        if (!r2.ok) { UI.toast(r2.msg, 'err'); return; }
+        UI.toast(r2.msg);
+        UI.modalClose();
+        UI.renderHome();
+        UI.refreshBadges();
+        UI.renderDispatch();
+      };
+    },
+  });
+};
+
+/** 恢复已删除派单（回收站 → 正常列表） */
+UI.dispatchRestore = (id) => {
+  const res = NK.restoreDispatch(id);
+  if (!res.ok) { UI.toast(res.msg, 'err'); return; }
+  UI.toast(res.msg);
+  UI.renderHome();
+  UI.refreshBadges();
+  UI.renderDispatch();
+};
+
+/** 永久删除（回收站内，二次确认） */
+UI.dispatchPurge = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  UI.confirm(`永久删除后无法恢复，是否继续？\n（${d.no} ${d.title} 将从系统彻底移除，仅保留此提示）`, () => {
+    NK.purgeDispatch(id);
+    UI.toast('花姐，这条记录已永久删除。');
+    UI.renderHome();
+    UI.refreshBadges();
+    UI.renderDispatch();
+  }, '永久删除', { danger: true });
+};
+
+/** 恢复已撤销派单（重新进入待跟进） */
+UI.dispatchUnrevoke = (id) => {
+  const d = NK.getDispatch(id);
+  if (!d) return;
+  UI.confirm(`恢复后该派单将重新进入待跟进流程。\n（${d.no} ${d.title}）确认恢复吗？`, () => {
+    const res = NK.unrevokeDispatch(id);
+    if (!res.ok) { UI.toast(res.msg, 'err'); return; }
+    UI.toast(res.msg);
+    UI.renderHome();
+    UI.refreshBadges();
+    UI.renderDispatch();
+  }, '恢复派单');
+};
+
+/** 验收入口（从首页/列表） */UI.acceptOpen = (id) => {
   const d = NK.getDispatch(id);
   if (d) { UI.dispatchDetail(id); return; }
   const t = NK.getTask(id);
@@ -4150,6 +4345,24 @@ UI.bindAssistant = () => {
       }
       if (act === 'assistantConfirmIntent') {
         pushBot(NK.assistant.confirmIntent(arg)[0]); return;
+      }
+      if (act === 'assistantRevokePick') {
+        pushBot(NK.assistant.x_dispatch_revoke({ dispatchId: arg, candidates: [] })[0]); return;
+      }
+      if (act === 'assistantDeletePick') {
+        pushBot(NK.assistant.x_dispatch_delete({ dispatchId: arg, candidates: [] })[0]); return;
+      }
+      if (act === 'assistantConfirmRevokeDispatch') {
+        const r = NK.assistant.confirmRevokeDispatch(arg);
+        pushBot({ text: r.msg });
+        if (r.ok) { UI.renderHome(); UI.refreshBadges(); UI.renderDispatch(); }
+        return;
+      }
+      if (act === 'assistantConfirmDeleteDispatch') {
+        const r = NK.assistant.confirmDeleteDispatch(arg);
+        pushBot({ text: r.msg });
+        if (r.ok) { UI.renderHome(); UI.refreshBadges(); UI.renderDispatch(); }
+        return;
       }
       if (act === 'assistantNoop') { return; }
       if (act === 'assistantShowLogs') {

@@ -147,6 +147,49 @@
     return pros.map(p => ({ p, s: score(p) })).filter(x => x.s > 0).sort((a, b) => b.s - a.s).map(x => x.p);
   };
 
+  /** 匹配派单：支持编号(no)/标题/职场/工程师；默认排除已删除/已撤销/已取消/已闭环 */
+  A.matchDispatch = (kw, opts = {}) => {
+    kw = (kw || '').trim();
+    if (!kw) return [];
+    const includeAll = !!opts.includeAll;
+    const disps = (NK.db.dispatches || []).filter(d => {
+      if (includeAll) return true;
+      if (d.recordStatus === '已删除') return false;
+      if (d.status === '已撤销' || d.status === '已取消' || d.status === '已闭环') return false;
+      return true;
+    });
+    const score = (d) => {
+      let s = 0;
+      const title = d.title || '';
+      const no = d.no || '';
+      const site = d.siteName || d.city || '';
+      const eng = d.engineer || '';
+      // 编号精确/前缀优先
+      if (no === kw) s += 120;
+      else if (no && kw.indexOf(no) !== -1) s += 100;
+      else if (kw.startsWith('单') && no && no.indexOf(kw.slice(1)) !== -1) s += 100;
+      if (title === kw) s += 80;
+      else if (title.indexOf(kw) !== -1) s += 50;
+      else if (kw.length >= 2) {
+        const words = kw.replace(/[，。、\s]/g, ' ').split(' ').filter(w => w.length >= 2);
+        let hit = 0, denom = words.length;
+        words.forEach(w => { if (title.indexOf(w) !== -1 || no.indexOf(w) !== -1) hit++; });
+        if (hit === 0 && words.length) {
+          const grams = [];
+          for (let i = 0; i + 1 < kw.length; i++) grams.push(kw.slice(i, i + 2));
+          denom = grams.length;
+          grams.forEach(g => { if (title.indexOf(g) !== -1 || no.indexOf(g) !== -1) hit++; });
+        }
+        if (denom) s += (hit / denom) * 40;
+      }
+      if (site && kw.indexOf(site) !== -1) s += 25;
+      if (eng && kw.indexOf(eng) !== -1) s += 15;
+      return s;
+    };
+    const scored = disps.map(d => ({ d, s: score(d) })).filter(x => x.s > 0).sort((a, b) => b.s - a.s);
+    return scored.map(x => x.d);
+  };
+
   /** 任务是否超时 */
   A.isOverdue = (t) => t.status !== '已完成' && t.dueDate && t.dueDate < A.today();
 
@@ -275,6 +318,30 @@
         personName: eng ? eng.name : '', engineerId: eng ? eng.id : '',
         startDate: start, endDate: start, timePeriod: period,
         confidence: eng ? 0.9 : 0.7,
+      });
+    }
+
+    /* —— 撤销派单（业务取消） —— */
+    if (/撤销.*派单|把.*派单撤销|取消.*派单/.test(q) && !/撤销刚才|撤销.*上一步/.test(q)) {
+      const kw = q.replace(/撤销|派单|了|吧|把/g, '').replace(/^[，,：:\s]+/, '').replace(/[，。、]?$/, '').trim();
+      const cands = A.matchDispatch(kw || q);
+      const unique = cands.length === 1;
+      return Object.assign(intent, {
+        intent: 'action', action: 'dispatch_revoke', targetModule: 'dispatch',
+        dispatchId: unique ? cands[0].id : '', matchKw: kw, candidates: unique ? [] : cands.map(d => ({ id: d.id, no: d.no, title: d.title })),
+        confidence: unique ? 0.85 : (cands.length ? 0.5 : 0.3),
+      });
+    }
+
+    /* —— 删除派单（录入错误 → 回收站） —— */
+    if (/删除.*派单|把.*派单删除/.test(q) && !/撤销刚才|撤销.*上一步/.test(q)) {
+      const kw = q.replace(/删除|派单|了|吧|把/g, '').replace(/^[，,：:\s]+/, '').replace(/[，。、]?$/, '').trim();
+      const cands = A.matchDispatch(kw || q, { includeAll: true });
+      const unique = cands.length === 1;
+      return Object.assign(intent, {
+        intent: 'action', action: 'dispatch_delete', targetModule: 'dispatch',
+        dispatchId: unique ? cands[0].id : '', matchKw: kw, candidates: unique ? [] : cands.map(d => ({ id: d.id, no: d.no, title: d.title, status: d.status })),
+        confidence: unique ? 0.85 : (cands.length ? 0.5 : 0.3),
       });
     }
 
@@ -787,6 +854,107 @@
     }];
   };
 
+  /** 派单摘要（用于确认卡片） */
+  A._dispatchSummary = (d) => {
+    const v = NK.v.dispatch(d);
+    const site = v.siteName || d.city || '—';
+    const eng = v.engineer || '—';
+    return `派单 ${d.no}｜${v.title}\n职场：${site}　工程师：${eng}　状态：${d.status}`;
+  };
+
+  /** 撤销派单（业务取消；唯一匹配先展示摘要确认） */
+  A.x_dispatch_revoke = (intent) => {
+    // 多候选：让花姐选
+    if (intent.candidates && intent.candidates.length > 1) {
+      return [{
+        text: `花姐，有 ${intent.candidates.length} 条派单匹配「${intent.matchKw}」，你要撤销哪一条？`,
+        actions: intent.candidates.slice(0, 4).map(c => ({
+          label: `${c.no} ${c.title}`, act: 'assistantRevokePick', arg: c.id,
+        })),
+      }];
+    }
+    const d = intent.dispatchId ? NK.getDispatch(intent.dispatchId) : null;
+    if (!d) {
+      return [{ text: `花姐，没找到「${intent.matchKw}」这条进行中的派单～ 你可以用派单编号或职场/事项名称描述。` }];
+    }
+    if (d.status === '已撤销') return [{ text: `花姐，派单 ${d.no} 已经是"已撤销"状态了。` }];
+    if (d.recordStatus === '已删除') return [{ text: `花姐，派单 ${d.no} 已在回收站中，请先恢复再撤销。` }];
+    return [{
+      text: `我将撤销这条派单，撤销后不再进入催办和超时提醒，但会保留完整记录：\n${A._dispatchSummary(d)}\n确认撤销吗？`,
+      requiresConfirmation: true,
+      actions: [
+        { label: '确认撤销', act: 'assistantConfirmRevokeDispatch', arg: d.id },
+        { label: '再想想', act: 'assistantNoop' },
+      ],
+    }];
+  };
+
+  /** 删除派单（录入错误 → 回收站；删除为高风险需二次确认） */
+  A.x_dispatch_delete = (intent) => {
+    if (intent.candidates && intent.candidates.length > 1) {
+      return [{
+        text: `花姐，有 ${intent.candidates.length} 条派单匹配「${intent.matchKw}」，你要删除哪一条？`,
+        actions: intent.candidates.slice(0, 4).map(c => ({
+          label: `${c.no} ${c.title}（${c.status}）`, act: 'assistantDeletePick', arg: c.id,
+        })),
+      }];
+    }
+    const d = intent.dispatchId ? NK.getDispatch(intent.dispatchId) : null;
+    if (!d) {
+      return [{ text: `花姐，没找到「${intent.matchKw}」这条派单～ 你可以用派单编号或职场/事项名称描述。` }];
+    }
+    // 探测是否可普通删除（已处理需引导撤销）—— 仅判断状态，不真正执行删除
+    const processed = ['已发送', '跟进中', '处理中', '等待外部条件', '已处理', '待花姐验收', '已闭环'];
+    if (processed.includes(d.status) && d.recordStatus !== '已删除') {
+      return [{
+        text: `花姐，派单 ${d.no} 已经产生处理记录，建议用「撤销派单」保留过程留痕：\n${A._dispatchSummary(d)}\n要改为撤销吗？`,
+        requiresConfirmation: true,
+        actions: [
+          { label: '改为撤销派单', act: 'assistantConfirmRevokeDispatch', arg: d.id },
+          { label: '不操作', act: 'assistantNoop' },
+        ],
+      }];
+    }
+    return [{
+      text: `我将删除这条派单，删除后将移入回收站（可恢复），不会永久清库：\n${A._dispatchSummary(d)}\n删除是不可逆的误录纠错操作，确认删除吗？`,
+      requiresConfirmation: true,
+      actions: [
+        { label: '确认删除', act: 'assistantConfirmDeleteDispatch', arg: d.id },
+        { label: '取消', act: 'assistantNoop' },
+      ],
+    }];
+  };
+
+  /** 确认撤销派单（从确认卡片回调） */
+  A.confirmRevokeDispatch = (id) => {
+    const d = NK.getDispatch(id);
+    if (!d) return { ok: false, msg: '找不到这条派单' };
+    if (d.status === '已撤销') return { ok: false, msg: `派单 ${d.no} 已经撤销过了` };
+    const snap = A._snapshot(['dispatches', 'tasks', 'leaves']);
+    const res = NK.revokeDispatch(id, { reason: '花姐助手撤销', cancelTask: true });
+    if (!res.ok) return { ok: false, msg: res.msg };
+    A._logOp({ type: 'revoke_dispatch', desc: `撤销派单 ${d.no} ${d.title}`, snapshot: snap });
+    return { ok: true, msg: res.leaveLinked
+      ? '花姐，补位派单已撤销，休假记录已重新标记为"补位待安排"。'
+      : '花姐，这条派单已经撤销，不会再进入催办和超时提醒。' };
+  };
+
+  /** 确认删除派单（从确认卡片回调） */
+  A.confirmDeleteDispatch = (id) => {
+    const d = NK.getDispatch(id);
+    if (!d) return { ok: false, msg: '找不到这条派单' };
+    // 先快照（记录删除前状态），再删除，保证可撤销
+    const snap = A._snapshot(['dispatches', 'tasks', 'leaves']);
+    const res = NK.softDeleteDispatch(id, { reason: '花姐助手删除', force: false });
+    if (!res.ok) {
+      if (res.blocked) return { ok: false, msg: res.msg + ' 建议改用撤销派单。' };
+      return { ok: false, msg: res.msg };
+    }
+    A._logOp({ type: 'delete_dispatch', desc: `删除派单 ${d.no} ${d.title}（进回收站）`, snapshot: snap });
+    return { ok: true, msg: '花姐，这条错误记录已经移到回收站。' };
+  };
+
+
   /** KPI 候选事件（B类，只能创建候选，不能正式扣分） */
   A.x_kpi_event = (intent) => {
     const engName = intent.personName;
@@ -906,6 +1074,8 @@
       quick_note: () => A.x_quick_note(intent),
       leave_create: () => A.x_leave_create(intent),
       dispatch_create: () => A.x_dispatch_create(intent),
+      dispatch_revoke: () => A.x_dispatch_revoke(intent),
+      dispatch_delete: () => A.x_dispatch_delete(intent),
       kpi_event: () => A.x_kpi_event(intent),
       handover: () => A.x_handover(),
       clear_alerts: () => A.x_clear_alerts(intent, false),

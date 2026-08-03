@@ -2043,7 +2043,7 @@ UI.renderTasks = () => {
   const typeOpts = ['全部', ...NK.TASK_TYPES];
   const srcOpts = ['全部', '系统固定任务', '花姐手动新增', '安全告警', '派单自动关联', '专项任务', '已完成', '已取消', '已删除'];
   el.innerHTML = UI.pageHead('任务与告警', '任务闭环 · 告警驱动 · 固定任务每日/月度自动生成',
-    `<button class="btn btn-accent" onclick="UI.taskCreate()">✚ 新建任务</button>`) +
+    `<button class="btn" onclick="UI.triggerFixed('TPL005')">🖨️ 收到耗材提醒</button><button class="btn btn-accent" onclick="UI.taskCreate()">✚ 新建任务</button>`) +
     `<div class="filter-bar">
       <input class="fb-input" id="tkQ" placeholder="搜索编号/名称/职场/工程师…" value="${NK.esc(f.q || '')}">
       <select class="fb-select" id="tkStatus">${statusOpts.map(s => `<option ${(f.status || '全部') === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
